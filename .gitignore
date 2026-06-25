@@ -1,0 +1,23 @@
+# Build output
+bin/
+obj/
+
+# IDE / editor
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.swp
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Session data
+*.session
+
+# Logs
+*.log
