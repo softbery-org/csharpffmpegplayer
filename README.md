@@ -93,11 +93,30 @@ The project bundles native `.so` files in the `lib/` directory. If the bundled l
 
 ---
 
-## Building
+## Installation
+
+### Option 1: Download prebuilt binary (recommended)
+
+Download the latest release from [GitHub Releases](https://github.com/softbery-org/csharpffmpegplayer/releases/tag/v1.0.0):
 
 ```bash
-git clone https://github.com/softbery/CSharpFFmpeg.git
-cd CSharpFFmpeg
+# Download the archive
+wget https://github.com/softbery-org/csharpffmpegplayer/releases/download/v1.0.0/csharpffmpegplayer-v1.0.0-linux-x64.tar.gz
+
+# Extract
+tar xzf csharpffmpegplayer-v1.0.0-linux-x64.tar.gz
+
+# Run
+./csharp-ffmpeg-player video.mp4 -gpu
+```
+
+> **Note:** The prebuilt binary includes all required native libraries (FFmpeg, SDL2, SDL2_ttf) bundled in the `lib/` directory. No additional system packages are needed beyond .NET 8 runtime.
+
+### Option 2: Build from source
+
+```bash
+git clone https://github.com/softbery-org/csharpffmpegplayer.git
+cd csharpffmpegplayer
 dotnet build -c Release
 ```
 
