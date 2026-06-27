@@ -18,6 +18,7 @@ class Program
         int targetFps = 0;
         string? subtitlePath = null;
         string? playlistPath = null;
+        string? urlListPath = null;
         var mediaFiles = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -36,7 +37,13 @@ class Program
                 playlistPath = args[i + 1];
                 i++;
             }
-            else if (args[i] == "-gpu" || args[i] == "--gpu" || args[i] == "--help" || args[i] == "-h")
+            else if ((args[i] == "--url-list" || args[i] == "-ul") && i + 1 < args.Length)
+            {
+                urlListPath = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "-gpu" || args[i] == "--gpu" || args[i] == "--help" || args[i] == "-h" ||
+                     args[i] == "--url-list" || args[i] == "-ul")
             {
                 continue;
             }
@@ -48,7 +55,12 @@ class Program
             {
                 // Collect media files (first one or any path that's not a flag value)
                 string arg = args[i];
-                if (File.Exists(arg) || Directory.Exists(arg))
+                if (arg.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                    arg.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    mediaFiles.Add(arg);
+                }
+                else if (File.Exists(arg) || Directory.Exists(arg))
                     mediaFiles.Add(arg);
             }
         }
@@ -91,11 +103,13 @@ class Program
 
         try
         {
+            PluginLoader.LoadPlugins();
+
             var playlist = new Playlist();
             double restorePositionSec = 0;
             SessionData? restoredSession = null;
 
-            bool hasCLIMedia = mediaFiles.Count > 0 || playlistPath != null;
+            bool hasCLIMedia = mediaFiles.Count > 0 || playlistPath != null || urlListPath != null;
 
             if (!hasCLIMedia)
             {
@@ -104,7 +118,7 @@ class Program
                 if (restoredSession != null)
                 {
                     var session = restoredSession;
-                    playlist.AddRange(session.Files);
+                    playlist.AddRange(session.Entries.Select(e => new PlaylistEntry(e.Url, e.DisplayName, e.SourceUrl)));
                     playlist.MoveTo(session.CurrentIndex);
                     restorePositionSec = session.PositionSec;
                     if (Enum.TryParse<RepeatMode>(session.RepeatMode, out var rm))
@@ -135,11 +149,66 @@ class Program
                     Console.Error.WriteLine($"[Playlist] Loaded {playlist.Count} items from {playlistPath}");
                 }
 
+                // Load from --url-list file (text file with URLs, one per line)
+                if (urlListPath != null && File.Exists(urlListPath))
+                {
+                    var urls = File.ReadAllLines(urlListPath)
+                        .Select(l => l.Trim())
+                        .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith("#"))
+                        .ToList();
+
+                    Console.Error.WriteLine($"[Playlist] Wczytano {urls.Count} URL-i z {urlListPath}");
+
+                    foreach (var url in urls)
+                    {
+                        var plugin = PluginLoader.FindPluginForUrl(url);
+                        if (plugin != null)
+                        {
+                            Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {url}");
+                            var entries = plugin.Resolve(url);
+                            if (entries.Count > 0)
+                            {
+                                foreach (var e in entries)
+                                    playlist.Add(e);
+                                Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS do playlisty");
+                            }
+                            else
+                            {
+                                Console.Error.WriteLine($"[{plugin.Name}] Nie znaleziono linków HLS dla: {url}");
+                            }
+                        }
+                        else
+                        {
+                            playlist.Add(url);
+                        }
+                    }
+                }
+
                 // Add individual media files from CLI
                 foreach (var f in mediaFiles)
                 {
-                    if (f != playlistPath)
+                    if (f == playlistPath) continue;
+
+                    var plugin = PluginLoader.FindPluginForUrl(f);
+                    if (plugin != null)
+                    {
+                        Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {f}");
+                        var entries = plugin.Resolve(f);
+                        if (entries.Count > 0)
+                        {
+                            foreach (var e in entries)
+                                playlist.Add(e);
+                            Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS do playlisty");
+                        }
+                        else
+                        {
+                            Console.Error.WriteLine($"[{plugin.Name}] Nie znaleziono linków HLS dla: {f}");
+                        }
+                    }
+                    else
+                    {
                         playlist.Add(f);
+                    }
                 }
 
                 if (playlist.Count == 0)
@@ -167,7 +236,7 @@ class Program
                 player.RestoreWinW = restoredSession.WindowW;
                 player.RestoreWinH = restoredSession.WindowH;
             }
-            player.Play(playlist.Current);
+            player.Play(playlist.Current, playlist.CurrentEntry);
             return 0;
         }
         catch (Exception ex)
@@ -288,6 +357,8 @@ class Program
             -sub PATH            Alias for --subtitle
             --playlist PATH      Load playlist file (.m3u, .txt — one file per line)
             -pl PATH             Alias for --playlist
+            --url-list PATH     Load URLs from text file (one URL per line, plugin-resolved)
+            -ul PATH            Alias for --url-list
             --help, -h           Show this help message
 
             <file...>            One or more media files to play sequentially
@@ -302,6 +373,8 @@ class Program
             csharp-ffmpeg-player --playlist mylist.m3u -gpu
             csharp-ffmpeg-player audio.mp3
             csharp-ffmpeg-player video.mp4 /usr/lib/x86_64-linux-gnu -gpu
+            csharp-ffmpeg-player https://example.com/stream.m3u8
+            csharp-ffmpeg-player --url-list urls.txt -gpu
 
         KEYBOARD CONTROLS:
             Space                Play / Pause

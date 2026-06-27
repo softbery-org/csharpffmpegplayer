@@ -3,10 +3,25 @@ using System.Text.Json.Serialization;
 
 namespace CSharpFFmpeg;
 
+public sealed class SessionEntry
+{
+    [JsonPropertyName("url")]
+    public string Url { get; set; } = "";
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = "";
+
+    [JsonPropertyName("sourceUrl")]
+    public string? SourceUrl { get; set; }
+}
+
 public sealed class SessionData
 {
+    [JsonPropertyName("entries")]
+    public List<SessionEntry> Entries { get; set; } = new();
+
     [JsonPropertyName("files")]
-    public List<string> Files { get; set; } = new();
+    public List<string>? LegacyFiles { get; set; }
 
     [JsonPropertyName("currentIndex")]
     public int CurrentIndex { get; set; } = 0;
@@ -53,7 +68,12 @@ public static class SessionManager
             Directory.CreateDirectory(ConfigDir);
             var data = new SessionData
             {
-                Files          = playlist.Files.ToList(),
+                Entries         = playlist.Entries.Select(e => new SessionEntry
+                {
+                    Url = e.Url,
+                    DisplayName = e.DisplayName,
+                    SourceUrl = e.SourceUrl,
+                }).ToList(),
                 CurrentIndex   = playlist.CurrentIndex,
                 PositionSec    = positionSec,
                 RepeatMode     = playlist.RepeatMode.ToString(),
@@ -66,7 +86,7 @@ public static class SessionManager
             };
             string json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
             File.WriteAllText(SessionFile, json);
-            Console.Error.WriteLine($"[Session] Saved {data.Files.Count} files, idx={data.CurrentIndex}, pos={positionSec:F1}s, vol={volume:F2}");
+            Console.Error.WriteLine($"[Session] Saved {data.Entries.Count} files, idx={data.CurrentIndex}, pos={positionSec:F1}s, vol={volume:F2}");
         }
         catch (Exception ex)
         {
@@ -82,16 +102,33 @@ public static class SessionManager
             string json = File.ReadAllText(SessionFile);
             var data = JsonSerializer.Deserialize<SessionData>(json);
             if (data == null) return null;
-            // Warn about missing files but keep them in list (removable media may reconnect)
-            int missing = data.Files.Count(f => !File.Exists(f));
+
+            // Migrate legacy flat file list
+            if (data.Entries.Count == 0 && data.LegacyFiles != null && data.LegacyFiles.Count > 0)
+            {
+                data.Entries = data.LegacyFiles
+                    .Where(f => string.IsNullOrEmpty(f) || File.Exists(f) || f.StartsWith("http"))
+                    .Select(f => new SessionEntry { Url = f, DisplayName = PlaylistEntry.ExtractDisplayName(f) })
+                    .ToList();
+                data.LegacyFiles = null;
+            }
+
+            // Warn about missing local files but keep URLs
+            int missing = data.Entries.Count(e =>
+                !string.IsNullOrEmpty(e.Url) &&
+                !e.Url.StartsWith("http") &&
+                !File.Exists(e.Url));
             if (missing > 0)
                 Console.Error.WriteLine($"[Session] Warning: {missing} file(s) not found on disk");
-            // Only drop if ALL files are missing
-            var existing = data.Files.Where(File.Exists).ToList();
-            if (existing.Count == 0) return null;
-            data.Files = existing;
-            data.CurrentIndex = Math.Clamp(data.CurrentIndex, 0, data.Files.Count - 1);
-            Console.Error.WriteLine($"[Session] Loaded {data.Files.Count} files, idx={data.CurrentIndex}, pos={data.PositionSec:F1}s, vol={data.Volume:F2}");
+
+            var valid = data.Entries.Where(e =>
+                string.IsNullOrEmpty(e.Url) ||
+                e.Url.StartsWith("http") ||
+                File.Exists(e.Url)).ToList();
+            if (valid.Count == 0) return null;
+            data.Entries = valid;
+            data.CurrentIndex = Math.Clamp(data.CurrentIndex, 0, data.Entries.Count - 1);
+            Console.Error.WriteLine($"[Session] Loaded {data.Entries.Count} files, idx={data.CurrentIndex}, pos={data.PositionSec:F1}s, vol={data.Volume:F2}");
             return data;
         }
         catch (Exception ex)

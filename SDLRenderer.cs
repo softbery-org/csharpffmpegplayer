@@ -16,11 +16,16 @@ public sealed class SDLRenderer : IDisposable
     private Action<byte[]>? _userAudioCallback;
     private int _windowW;
     private int _windowH;
-    private const int ProgressBarHeight = 70;
+    private const int ProgressBarHeight = 60;
     private const int TextHeight = 18;
-    private const int TrackHeight = 8;
+    private const int TrackHeight = 4;
     private const int BarBtnH = 22;
     private const int BarBtnW = 28;
+    private const int OverlayIconSize = 22;
+    private const int OverlayIconSpacing = 80;
+    private const int OverlayBottomMargin = 28;
+    private const int VolSliderW = 100;
+    private const int VolSliderH = 4;
     private double _progress;
     private double _duration;
     private string _title = "";
@@ -46,7 +51,7 @@ public sealed class SDLRenderer : IDisposable
         _window = SDL.SDL_CreateWindow(
             "CSharp FFmpeg Player",
             SDL.SDL_WINDOWPOS_CENTERED, SDL.SDL_WINDOWPOS_CENTERED,
-            width, height + ProgressBarHeight, SDL.SDL_WindowFlags.SDL_WINDOW_SHOWN | SDL.SDL_WindowFlags.SDL_WINDOW_RESIZABLE);
+            width, height, SDL.SDL_WindowFlags.SDL_WINDOW_SHOWN | SDL.SDL_WindowFlags.SDL_WINDOW_RESIZABLE);
         SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH);
         _renderer = SDL.SDL_CreateRenderer(_window, -1,
             SDL.SDL_RendererFlags.SDL_RENDERER_ACCELERATED | SDL.SDL_RendererFlags.SDL_RENDERER_PRESENTVSYNC);
@@ -143,6 +148,7 @@ public sealed class SDLRenderer : IDisposable
     private SDL.SDL_Rect _btnRepeat;
     private SDL.SDL_Rect _btnAdd;
     private SDL.SDL_Rect _btnAddFolder;
+    private SDL.SDL_Rect _btnAddUrl;
     private SDL.SDL_Rect _btnClear;
 
     // Progress bar bottom buttons
@@ -280,15 +286,11 @@ public sealed class SDLRenderer : IDisposable
     public float HitTestVolumeBar(int mx, int my)
     {
         if (!ControlsVisible) return -1f;
-        int videoAreaH = _windowH - ProgressBarHeight;
-        int centerX    = _windowW / 2;
-        int centerY    = videoAreaH / 2;
-        int barTop     = centerY + ButtonRadius + 14;
-        int barLeft    = centerX - VolBarMaxW / 2;
-        int barBottom  = barTop + VolBarH;
-        if (mx < barLeft || mx > barLeft + VolBarMaxW) return -1f;
-        if (my < barTop  || my > barBottom)            return -1f;
-        float frac = (mx - barLeft) / (float)VolBarMaxW;
+        int sliderY = _windowH - OverlayBottomMargin;
+        int sliderX = _windowW - 40 - VolSliderW;
+        if (mx < sliderX || mx > sliderX + VolSliderW) return -1f;
+        if (my < sliderY - 12 || my > sliderY + 12) return -1f;
+        float frac = (mx - sliderX) / (float)VolSliderW;
         return Math.Clamp(frac * VolMax, 0f, VolMax);
     }
 
@@ -296,9 +298,8 @@ public sealed class SDLRenderer : IDisposable
     public float SampleVolumeBarX(int mx)
     {
         if (!ControlsVisible) return -1f;
-        int centerX = _windowW / 2;
-        int barLeft = centerX - VolBarMaxW / 2;
-        float frac  = (mx - barLeft) / (float)VolBarMaxW;
+        int sliderX = _windowW - 40 - VolSliderW;
+        float frac = (mx - sliderX) / (float)VolSliderW;
         return Math.Clamp(frac * VolMax, 0f, VolMax);
     }
 
@@ -306,67 +307,57 @@ public sealed class SDLRenderer : IDisposable
     {
         if (!ControlsVisible) return;
 
-        int videoAreaH = _windowH - ProgressBarHeight;
-        int centerX    = _windowW / 2;
-        int centerY    = videoAreaH / 2;
-        int barTop     = centerY + ButtonRadius + 14;
-        int barLeft    = centerX - VolBarMaxW / 2;
-        int barBottom  = barTop + VolBarH;
-
-        // Fill fraction: how much of the width is "active"
+        int sliderY = _windowH - OverlayBottomMargin;
+        int sliderX = _windowW - 40 - VolSliderW;
         float fillFrac = Math.Clamp(Volume / VolMax, 0f, 1f);
-        int fillW      = (int)(VolBarMaxW * fillFrac);
+        int fillW = (int)(VolSliderW * fillFrac);
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
-        // Draw full triangle outline (gray, very faint — the "empty" part)
-        // Triangle: bottom-left, bottom-right, top-right
-        // Rasterise row by row: at row y (0=top), max x = VolBarMaxW * (y/(barH-1))
-        for (int row = 0; row < VolBarH; row++)
+        // Speaker icon (simple shape)
+        SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, 200);
+        int iconX = sliderX - 22;
+        int iconCY = sliderY;
+        // Speaker body
+        var spkBody = new SDL.SDL_Rect { x = iconX - 4, y = iconCY - 4, w = 6, h = 8 };
+        SDL.SDL_RenderFillRect(_renderer, ref spkBody);
+        // Speaker cone (triangle)
+        for (int dy = -7; dy <= 7; dy++)
         {
-            // row 0 = top (narrow), row VolBarH-1 = bottom (full width)
-            int rowW = (int)(VolBarMaxW * (row + 1) / (float)VolBarH);
-            int py   = barTop + row;
-            int px   = barLeft + (VolBarMaxW - rowW);  // right-aligned
-
-            // Filled portion (white)
-            int filledRowW = Math.Min(rowW, fillW - (VolBarMaxW - rowW));
-            // Simpler: split each row into filled (left) and empty (right) inside triangle
-            // Filled pixels are those where x <= barLeft + fillW  AND inside triangle
-            int triStartX = barLeft + (VolBarMaxW - rowW);
-            int triEndX   = barLeft + VolBarMaxW;
-            int splitX    = barLeft + fillW;
-
-            // Filled segment
-            if (splitX > triStartX)
-            {
-                int segW = Math.Min(splitX, triEndX) - triStartX;
-                if (segW > 0)
-                {
-                    SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, 210);
-                    var r = new SDL.SDL_Rect { x = triStartX, y = py, w = segW, h = 1 };
-                    SDL.SDL_RenderFillRect(_renderer, ref r);
-                }
-            }
-            // Empty segment
-            if (splitX < triEndX)
-            {
-                int emptyStart = Math.Max(splitX, triStartX);
-                int segW = triEndX - emptyStart;
-                if (segW > 0)
-                {
-                    SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, 40);
-                    var r = new SDL.SDL_Rect { x = emptyStart, y = py, w = segW, h = 1 };
-                    SDL.SDL_RenderFillRect(_renderer, ref r);
-                }
-            }
+            int dx = (int)(4 * (1.0 - (double)Math.Abs(dy) / 7));
+            var r = new SDL.SDL_Rect { x = iconX + 2, y = iconCY + dy, w = dx + 1, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref r);
         }
 
-        // Label: "Vol XX%"
+        // Track background
+        SDL.SDL_SetRenderDrawColor(_renderer, 80, 80, 80, 180);
+        var trackRect = new SDL.SDL_Rect { x = sliderX, y = sliderY - VolSliderH / 2, w = VolSliderW, h = VolSliderH };
+        SDL.SDL_RenderFillRect(_renderer, ref trackRect);
+
+        // Fill
+        if (fillW > 0)
+        {
+            SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, 220);
+            var fillRect = new SDL.SDL_Rect { x = sliderX, y = sliderY - VolSliderH / 2, w = fillW, h = VolSliderH };
+            SDL.SDL_RenderFillRect(_renderer, ref fillRect);
+        }
+
+        // Knob
+        int knobR = 5;
+        int knobX = sliderX + fillW;
+        SDL.SDL_SetRenderDrawColor(_renderer, 240, 240, 240, 230);
+        for (int dy = -knobR; dy <= knobR; dy++)
+        {
+            int dx = (int)Math.Sqrt(knobR * knobR - dy * dy);
+            var r = new SDL.SDL_Rect { x = knobX - dx, y = sliderY + dy, w = dx * 2, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref r);
+        }
+
+        // Volume percentage label
         if (_font != IntPtr.Zero)
         {
             string label = $"{(int)(Volume * 100)}%";
-            var col = new SDL.SDL_Color { r = 255, g = 255, b = 255, a = 180 };
+            var col = new SDL.SDL_Color { r = 220, g = 220, b = 220, a = 180 };
             IntPtr surf = SDLTtf.TTF_RenderUTF8_Blended(_font, label, col);
             if (surf != IntPtr.Zero)
             {
@@ -375,8 +366,7 @@ public sealed class SDLRenderer : IDisposable
                 if (tex != IntPtr.Zero)
                 {
                     SDL.SDL_QueryTexture(tex, out _, out _, out int tw, out int th);
-                    // Place label to the right of the bar
-                    var dst = new SDL.SDL_Rect { x = barLeft + VolBarMaxW + 8, y = barBottom - th, w = tw, h = th };
+                    var dst = new SDL.SDL_Rect { x = sliderX + VolSliderW + 6, y = sliderY - th / 2, w = tw, h = th };
                     SDL.SDL_RenderCopy(_renderer, tex, IntPtr.Zero, ref dst);
                     SDL.SDL_DestroyTexture(tex);
                 }
@@ -444,7 +434,7 @@ public sealed class SDLRenderer : IDisposable
     public void ScrollPlaylist(int delta)
     {
         if (_playlistNames.Length == 0 || _windowH <= 0) return;
-        int panelH      = _windowH - ProgressBarHeight;
+        int panelH      = _windowH;
         int visibleItems = Math.Max(1, (panelH - PlaylistHeaderH) / PlaylistItemHeight);
         int maxOffset   = Math.Max(0, _playlistNames.Length - visibleItems);
         _playlistScrollOffset = Math.Clamp(_playlistScrollOffset + delta, 0, maxOffset);
@@ -453,7 +443,7 @@ public sealed class SDLRenderer : IDisposable
     public void ScrollPlaylistToIndex(int index)
     {
         if (index < 0 || _windowH <= 0) return;
-        int panelH = _windowH - ProgressBarHeight;
+        int panelH = _windowH;
         int visibleItems = (panelH - PlaylistHeaderH) / PlaylistItemHeight;
         if (index < _playlistScrollOffset)
             _playlistScrollOffset = index;
@@ -461,17 +451,18 @@ public sealed class SDLRenderer : IDisposable
             _playlistScrollOffset = index - visibleItems + 1;
     }
 
-    public enum PlaylistPanelHit { None, RepeatMode, AddFile, AddFolder, ClearPlaylist, ItemClick }
+    public enum PlaylistPanelHit { None, RepeatMode, AddFile, AddFolder, AddUrl, ClearPlaylist, ItemClick }
     public int PlaylistPanelClickedItem = -1;
 
     public PlaylistPanelHit HitTestPlaylistPanel(int x, int y)
     {
         if (!PlaylistPanelVisible) return PlaylistPanelHit.None;
         if (x < 0 || x >= PlaylistPanelWidth) return PlaylistPanelHit.None;
-        if (y >= _windowH - ProgressBarHeight) return PlaylistPanelHit.None;
+        if (y >= _windowH) return PlaylistPanelHit.None;
         if (Contains(_btnRepeat,    x, y)) return PlaylistPanelHit.RepeatMode;
         if (Contains(_btnAdd,       x, y)) return PlaylistPanelHit.AddFile;
         if (Contains(_btnAddFolder, x, y)) return PlaylistPanelHit.AddFolder;
+        if (Contains(_btnAddUrl,    x, y)) return PlaylistPanelHit.AddUrl;
         if (Contains(_btnClear,     x, y)) return PlaylistPanelHit.ClearPlaylist;
         // Item click
         if (y >= 70)
@@ -504,7 +495,7 @@ public sealed class SDLRenderer : IDisposable
     public int GetPlaylistDropIndex(int y)
     {
         if (y < PlaylistHeaderH) return 0;
-        int panelH = _windowH - ProgressBarHeight;
+        int panelH = _windowH;
         if (y >= panelH) return _playlistNames.Length;
         int relY = y - PlaylistHeaderH;
         int idx = _playlistScrollOffset + relY / PlaylistItemHeight;
@@ -523,7 +514,7 @@ public sealed class SDLRenderer : IDisposable
         _playlistCurrentIndex = currentIndex;
         if (trackChanged && currentIndex >= 0 && _windowH > 0)
         {
-            int panelH = _windowH - ProgressBarHeight;
+            int panelH = _windowH;
             int visibleItems = Math.Max(1, (panelH - PlaylistHeaderH) / PlaylistItemHeight);
             if (currentIndex < _playlistScrollOffset)
                 _playlistScrollOffset = currentIndex;
@@ -532,10 +523,12 @@ public sealed class SDLRenderer : IDisposable
         }
     }
 
-    public enum ControlButton { None, PlayPause, Stop, OpenFile }
+    public enum ControlButton { None, Prev, PlayPause, Next, Stop, OpenFile }
     private const int ButtonRadius = 28;
     private const int ButtonSpacing = 80;
     private int _hoveredButton = -1;
+    private int[] _overlayButtonXs = [];
+    private int _overlayButtonY = 0;
 
     public void RenderUI()
     {
@@ -565,27 +558,24 @@ public sealed class SDLRenderer : IDisposable
         SDL.SDL_RenderClear(_renderer);
 
         SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH);
-        int videoAreaH = _windowH - ProgressBarHeight;
 
-        // Preserve aspect ratio: fit to width, center vertically
+        // Video fills entire window — preserve aspect ratio, center
         double videoAspect = (double)_width / _height;
-        double areaAspect = (double)_windowW / videoAreaH;
+        double areaAspect = (double)_windowW / _windowH;
         int dstW, dstH, dstX, dstY;
         if (areaAspect > videoAspect)
         {
-            // Area is wider than video — fit by height, center horizontally
-            dstH = videoAreaH;
+            dstH = _windowH;
             dstW = (int)(dstH * videoAspect);
             dstX = (_windowW - dstW) / 2;
             dstY = 0;
         }
         else
         {
-            // Area is taller than video — fit by width, center vertically
             dstW = _windowW;
             dstH = (int)(dstW / videoAspect);
             dstX = 0;
-            dstY = (videoAreaH - dstH) / 2;
+            dstY = (_windowH - dstH) / 2;
         }
         var dstRect = new SDL.SDL_Rect { x = dstX, y = dstY, w = dstW, h = dstH };
         SDL.SDL_RenderCopy(_renderer, _texture, IntPtr.Zero, ref dstRect);
@@ -633,19 +623,17 @@ public sealed class SDLRenderer : IDisposable
 
     public int GetProgressBarY() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowH - ProgressBarHeight; }
     public int GetWindowWidth() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowW; }
+    public int GetWindowHeight() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowH; }
 
     public ControlButton HitTestControl(int x, int y)
     {
         if (!ControlsVisible) return ControlButton.None;
-        int videoAreaH = _windowH - ProgressBarHeight;
-        int centerX = _windowW / 2;
-        int centerY = videoAreaH / 2;
-        int[] buttonXs = { centerX - ButtonSpacing, centerX, centerX + ButtonSpacing };
-        for (int i = 0; i < 3; i++)
+        int hitR = OverlayIconSize / 2 + 6;
+        for (int i = 0; i < _overlayButtonXs.Length; i++)
         {
-            int dx = x - buttonXs[i];
-            int dy = y - centerY;
-            if (dx * dx + dy * dy <= ButtonRadius * ButtonRadius)
+            int dx = x - _overlayButtonXs[i];
+            int dy = y - _overlayButtonY;
+            if (dx * dx + dy * dy <= hitR * hitR)
                 return (ControlButton)(i + 1);
         }
         return ControlButton.None;
@@ -658,58 +646,73 @@ public sealed class SDLRenderer : IDisposable
 
     private void DrawControls()
     {
-        int videoAreaH = _windowH - ProgressBarHeight;
+        // 5 buttons: Prev, PlayPause, Next, Stop, OpenFile — centered on screen
+        ControlButton[] buttons = { ControlButton.Prev, ControlButton.PlayPause, ControlButton.Next, ControlButton.Stop, ControlButton.OpenFile };
+        int n = buttons.Length;
         int centerX = _windowW / 2;
-        int centerY = videoAreaH / 2;
-        int[] buttonXs = { centerX - ButtonSpacing, centerX, centerX + ButtonSpacing };
-        ControlButton[] buttons = { ControlButton.PlayPause, ControlButton.Stop, ControlButton.OpenFile };
+        int centerY = _windowH / 2;
+        int totalW = (n - 1) * OverlayIconSpacing;
+        int startX = centerX - totalW / 2;
+
+        _overlayButtonY = centerY;
+        _overlayButtonXs = new int[n];
+        for (int i = 0; i < n; i++)
+            _overlayButtonXs[i] = startX + i * OverlayIconSpacing;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
-        for (int i = 0; i < 3; i++)
+        for (int i = 0; i < n; i++)
         {
-            int bx = buttonXs[i];
+            int bx = _overlayButtonXs[i];
             bool hovered = _hoveredButton == i;
             byte bgAlpha = hovered ? (byte)160 : (byte)40;
             byte iconAlpha = hovered ? (byte)255 : (byte)180;
+            int r = ButtonRadius;
 
-            // Button circle background
-            SDL.SDL_SetRenderDrawColor(_renderer, 30, 30, 30, bgAlpha);
-            for (int dy = -ButtonRadius; dy <= ButtonRadius; dy++)
+            // Button circle background — only on hover
+            if (hovered)
             {
-                int dx = (int)Math.Sqrt(ButtonRadius * ButtonRadius - dy * dy);
-                var r = new SDL.SDL_Rect { x = bx - dx, y = centerY + dy, w = dx * 2, h = 1 };
-                SDL.SDL_RenderFillRect(_renderer, ref r);
-            }
-
-            // Button circle outline (ring with thickness)
-            SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, iconAlpha);
-            int outlineThickness = 2;
-            for (int dy = -ButtonRadius; dy <= ButtonRadius; dy++)
-            {
-                int outerDx = (int)Math.Sqrt(ButtonRadius * ButtonRadius - dy * dy);
-                int innerR = ButtonRadius - outlineThickness;
-                int innerDx = innerR > 0 && Math.Abs(dy) <= innerR
-                    ? (int)Math.Sqrt(innerR * innerR - dy * dy)
-                    : 0;
-                if (outerDx > innerDx)
+                SDL.SDL_SetRenderDrawColor(_renderer, 30, 30, 30, bgAlpha);
+                for (int dy = -r; dy <= r; dy++)
                 {
-                    var r = new SDL.SDL_Rect { x = bx - outerDx, y = centerY + dy, w = outerDx - innerDx, h = 1 };
-                    SDL.SDL_RenderFillRect(_renderer, ref r);
-                    var r2 = new SDL.SDL_Rect { x = bx + innerDx, y = centerY + dy, w = outerDx - innerDx, h = 1 };
-                    SDL.SDL_RenderFillRect(_renderer, ref r2);
+                    int dx = (int)Math.Sqrt(r * r - dy * dy);
+                    var row = new SDL.SDL_Rect { x = bx - dx, y = centerY + dy, w = dx * 2, h = 1 };
+                    SDL.SDL_RenderFillRect(_renderer, ref row);
+                }
+
+                // Button circle outline (ring with thickness)
+                SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, iconAlpha);
+                int outlineThickness = 2;
+                for (int dy = -r; dy <= r; dy++)
+                {
+                    int outerDx = (int)Math.Sqrt(r * r - dy * dy);
+                    int innerR = r - outlineThickness;
+                    int innerDx = innerR > 0 && Math.Abs(dy) <= innerR
+                        ? (int)Math.Sqrt(innerR * innerR - dy * dy)
+                        : 0;
+                    if (outerDx > innerDx)
+                    {
+                        var r1 = new SDL.SDL_Rect { x = bx - outerDx, y = centerY + dy, w = outerDx - innerDx, h = 1 };
+                        SDL.SDL_RenderFillRect(_renderer, ref r1);
+                        var r2 = new SDL.SDL_Rect { x = bx + innerDx, y = centerY + dy, w = outerDx - innerDx, h = 1 };
+                        SDL.SDL_RenderFillRect(_renderer, ref r2);
+                    }
                 }
             }
 
-            var iconColor = new SDL.SDL_Color { r = 220, g = 220, b = 220, a = iconAlpha };
-
             switch (buttons[i])
             {
+                case ControlButton.Prev:
+                    DrawPrevIcon(bx, centerY, iconAlpha);
+                    break;
                 case ControlButton.PlayPause:
                     if (IsPlaying)
                         DrawPauseIcon(bx, centerY, iconAlpha);
                     else
                         DrawPlayIcon(bx, centerY, iconAlpha);
+                    break;
+                case ControlButton.Next:
+                    DrawNextIcon(bx, centerY, iconAlpha);
                     break;
                 case ControlButton.Stop:
                     DrawStopIcon(bx, centerY, iconAlpha);
@@ -725,20 +728,21 @@ public sealed class SDLRenderer : IDisposable
 
     private void DrawPlayIcon(int cx, int cy, byte alpha)
     {
-        SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, alpha);
-        int s = 14;
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        int s = 12;
+        int offset = 4;
         for (int dy = -s; dy <= s; dy++)
         {
             int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
-            var r = new SDL.SDL_Rect { x = cx - 4, y = cy + dy, w = halfW, h = 1 };
+            var r = new SDL.SDL_Rect { x = cx - offset, y = cy + dy, w = halfW, h = 1 };
             SDL.SDL_RenderFillRect(_renderer, ref r);
         }
     }
 
     private void DrawPauseIcon(int cx, int cy, byte alpha)
     {
-        SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, alpha);
-        int barW = 7, barH = 22;
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        int barW = 5, barH = 20;
         var left = new SDL.SDL_Rect { x = cx - barW - 1, y = cy - barH / 2, w = barW, h = barH };
         var right = new SDL.SDL_Rect { x = cx + 1, y = cy - barH / 2, w = barW, h = barH };
         SDL.SDL_RenderFillRect(_renderer, ref left);
@@ -747,30 +751,58 @@ public sealed class SDLRenderer : IDisposable
 
     private void DrawStopIcon(int cx, int cy, byte alpha)
     {
-        SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, alpha);
-        int s = 12;
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        int s = 10;
         var r = new SDL.SDL_Rect { x = cx - s, y = cy - s, w = s * 2, h = s * 2 };
         SDL.SDL_RenderFillRect(_renderer, ref r);
     }
 
+    private void DrawPrevIcon(int cx, int cy, byte alpha)
+    {
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        // Left bar
+        var bar = new SDL.SDL_Rect { x = cx - 8, y = cy - 9, w = 3, h = 18 };
+        SDL.SDL_RenderFillRect(_renderer, ref bar);
+        // Left-pointing triangle (tip on left, base on right)
+        int s = 10;
+        for (int dy = -s; dy <= s; dy++)
+        {
+            int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
+            var r = new SDL.SDL_Rect { x = cx + 5 - halfW, y = cy + dy, w = halfW, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref r);
+        }
+    }
+
+    private void DrawNextIcon(int cx, int cy, byte alpha)
+    {
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        // Right-pointing triangle (tip on right, base on left)
+        int s = 10;
+        for (int dy = -s; dy <= s; dy++)
+        {
+            int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
+            var r = new SDL.SDL_Rect { x = cx - 5, y = cy + dy, w = halfW, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref r);
+        }
+        // Right bar
+        var bar = new SDL.SDL_Rect { x = cx + 5, y = cy - 9, w = 3, h = 18 };
+        SDL.SDL_RenderFillRect(_renderer, ref bar);
+    }
+
     private void DrawOpenFileIcon(int cx, int cy, byte alpha)
     {
-        SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, alpha);
-        // Folder shape: tab + body
-        int w = 24, h = 18;
+        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
+        int w = 22, h = 16;
         int fx = cx - w / 2, fy = cy - h / 2;
-        // Tab
-        var tab = new SDL.SDL_Rect { x = fx, y = fy, w = 8, h = 4 };
+        var tab = new SDL.SDL_Rect { x = fx, y = fy, w = 8, h = 3 };
         SDL.SDL_RenderFillRect(_renderer, ref tab);
-        // Body
-        var body = new SDL.SDL_Rect { x = fx, y = fy + 4, w = w, h = h - 4 };
+        var body = new SDL.SDL_Rect { x = fx, y = fy + 3, w = w, h = h - 3 };
         SDL.SDL_RenderFillRect(_renderer, ref body);
-        // Arrow pointing right (open)
         SDL.SDL_SetRenderDrawColor(_renderer, 30, 30, 30, alpha);
-        int ay = cy + 2;
-        for (int dy = -4; dy <= 4; dy++)
+        int ay = cy + 1;
+        for (int dy = -3; dy <= 3; dy++)
         {
-            int dx = 4 - Math.Abs(dy);
+            int dx = 3 - Math.Abs(dy);
             SDL.SDL_RenderDrawPoint(_renderer, cx + dx, ay + dy);
             if (dx > 0) SDL.SDL_RenderDrawPoint(_renderer, cx + dx - 1, ay + dy);
         }
@@ -806,9 +838,9 @@ public sealed class SDLRenderer : IDisposable
 
     private void DrawPlaylistPanel()
     {
-        if (_font == IntPtr.Zero || _playlistNames.Length == 0) return;
+        if (_font == IntPtr.Zero) return;
 
-        int panelH = _windowH - ProgressBarHeight;
+        int panelH = _windowH;
         int panelX = 0;
         int panelW = PlaylistPanelWidth;
 
@@ -863,6 +895,15 @@ public sealed class SDLRenderer : IDisposable
         SDL.SDL_SetRenderDrawColor(_renderer, 70, 90, 120, 200);
         SDL.SDL_RenderDrawRect(_renderer, ref _btnRepeat);
         RenderTextInPanel(repeatLabel, _btnRepeat.x + 8, _btnRepeat.y + 5, repeatColor);
+
+        // === Add URL button (🔗) ===
+        _btnAddUrl = new SDL.SDL_Rect { x = panelX + panelW - 144, y = 37, w = 30, h = 26 };
+        SDL.SDL_SetRenderDrawColor(_renderer, 70, 40, 90, 200);
+        SDL.SDL_RenderFillRect(_renderer, ref _btnAddUrl);
+        SDL.SDL_SetRenderDrawColor(_renderer, 150, 90, 200, 220);
+        SDL.SDL_RenderDrawRect(_renderer, ref _btnAddUrl);
+        RenderTextInPanel("URL", _btnAddUrl.x + 3, _btnAddUrl.y + 4,
+            new SDL.SDL_Color { r = 210, g = 170, b = 255, a = 255 });
 
         // === Clear playlist button (🗑) ===
         _btnClear = new SDL.SDL_Rect { x = panelX + panelW - 108, y = 37, w = 30, h = 26 };
@@ -1039,10 +1080,9 @@ public sealed class SDLRenderer : IDisposable
         var black = new SDL.SDL_Color { r = 0, g = 0, b = 0, a = 180 };
 
         string[] lines = _subtitleText.Split('\n');
-        int videoAreaH = _windowH - ProgressBarHeight;
         int lineH = 28;
         int totalH = lines.Length * lineH;
-        int startY = videoAreaH - totalH - 20;
+        int startY = _windowH - totalH - ProgressBarHeight - 10;
 
         for (int i = 0; i < lines.Length; i++)
         {
@@ -1087,44 +1127,50 @@ public sealed class SDLRenderer : IDisposable
         int barW = _windowW - margin * 2;
         int barX = margin;
         int trackH = TrackHeight;
-        int trackY = barY + ProgressBarHeight - trackH - 6;
+        int trackY = _windowH - trackH - 4;
 
-        // Background of the progress bar area — 95% transparent
+        // Semi-transparent gradient overlay at bottom
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
-        SDL.SDL_SetRenderDrawColor(_renderer, 53, 50, 48, 13);
-        var bgRect = new SDL.SDL_Rect { x = 0, y = barY, w = _windowW, h = ProgressBarHeight };
-        SDL.SDL_RenderFillRect(_renderer, ref bgRect);
-        SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_NONE);
+        // Draw gradient: more opaque at bottom, fading upward
+        for (int i = 0; i < ProgressBarHeight; i++)
+        {
+            byte alpha = (byte)(180 * (i / (double)ProgressBarHeight));
+            SDL.SDL_SetRenderDrawColor(_renderer, 0, 0, 0, alpha);
+            var row = new SDL.SDL_Rect { x = 0, y = barY + i, w = _windowW, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref row);
+        }
 
         // Text row: title (left) and time (right) above the track
         DrawProgressBarText(barY, barX, barW);
 
-        // Track — fully opaque
-        SDL.SDL_SetRenderDrawColor(_renderer, 50, 50, 50, 255);
+        // Track — semi-transparent
+        SDL.SDL_SetRenderDrawColor(_renderer, 60, 60, 60, 180);
         var trackRect = new SDL.SDL_Rect { x = barX, y = trackY, w = barW, h = trackH };
         SDL.SDL_RenderFillRect(_renderer, ref trackRect);
 
-        // Fill — fully opaque
+        // Fill — blue accent
         double frac = _duration > 0 ? Math.Clamp(_progress / _duration, 0, 1) : 0;
         int fillW = (int)(barW * frac);
-        SDL.SDL_SetRenderDrawColor(_renderer, 80, 160, 255, 255);
+        SDL.SDL_SetRenderDrawColor(_renderer, 80, 160, 255, 230);
         if (fillW > 0)
         {
             var fillRect = new SDL.SDL_Rect { x = barX, y = trackY, w = fillW, h = trackH };
             SDL.SDL_RenderFillRect(_renderer, ref fillRect);
         }
 
-        // Knob — fully opaque
-        int knobR = 10;
+        // Knob — small, only visible when hovered or dragging
+        int knobR = 6;
         int knobX = barX + fillW;
         int knobY = trackY + trackH / 2;
-        SDL.SDL_SetRenderDrawColor(_renderer, 200, 220, 255, 255);
+        SDL.SDL_SetRenderDrawColor(_renderer, 220, 230, 255, 230);
         for (int dy = -knobR; dy <= knobR; dy++)
         {
             int dx = (int)Math.Sqrt(knobR * knobR - dy * dy);
             var lineRect = new SDL.SDL_Rect { x = knobX - dx, y = knobY + dy, w = dx * 2, h = 1 };
             SDL.SDL_RenderFillRect(_renderer, ref lineRect);
         }
+
+        SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_NONE);
     }
 
     private void DrawProgressBarText(int barY, int barX, int barW)
@@ -1182,7 +1228,7 @@ public sealed class SDLRenderer : IDisposable
         int margin = 20;
         int barW   = _windowW - margin * 2;
         int barX   = margin;
-        int barY   = _windowH - ProgressBarHeight;
+        int trackY = _windowH - TrackHeight - 4;
 
         if (_duration <= 0) return;
         double frac = Math.Clamp(ProgressHoverTime / _duration, 0, 1);
@@ -1192,7 +1238,7 @@ public sealed class SDLRenderer : IDisposable
         int tw   = ThumbW + pad * 2;
         int th   = ThumbH + pad * 2 + (_font != IntPtr.Zero ? 18 : 0);
         int tx   = Math.Clamp(cx - tw / 2, 0, _windowW - tw);
-        int ty   = barY - th - 8;
+        int ty   = trackY - th - 80;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
@@ -1236,10 +1282,10 @@ public sealed class SDLRenderer : IDisposable
             RenderText(label, tx + (tw - lw) / 2, ty + pad + ThumbH + 2, white);
         }
 
-        // Stem line to track
+        // Stem line to trackDevin-linux-x64-3.3.1018+next.16737566f5
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
         SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, 120);
-        SDL.SDL_RenderDrawLine(_renderer, cx, ty + th, cx, barY + ProgressBarHeight - TrackHeight - 6);
+        SDL.SDL_RenderDrawLine(_renderer, cx, ty + th, cx, trackY);
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_NONE);
     }
 
@@ -1253,7 +1299,7 @@ public sealed class SDLRenderer : IDisposable
         int lineH = 24;
         int panW = 380, panH = 32 + lines.Length * lineH + 16;
         int panX = (_windowW - panW) / 2;
-        int panY = (_windowH - ProgressBarHeight) / 2 - panH / 2;
+        int panY = _windowH / 2 - panH / 2;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
         SDL.SDL_SetRenderDrawColor(_renderer, 120, 20, 20, 220);
@@ -1280,7 +1326,7 @@ public sealed class SDLRenderer : IDisposable
 
         int panW = 420, panH = 220;
         int panX = (_windowW - panW) / 2;
-        int panY = (_windowH - ProgressBarHeight - panH) / 2;
+        int panY = (_windowH - panH) / 2;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 

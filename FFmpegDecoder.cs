@@ -15,6 +15,8 @@ public sealed unsafe class FFmpegDecoder : IDisposable
     private AVPacket* _packet;
     private AVBufferRef* _hwDeviceCtx;
     private bool _useHwAccel;
+    private string _currentUrl = "";
+    private double _lastSeekPos;
 
     public bool UseHwAccel { set => _useHwAccel = value; }
 
@@ -29,14 +31,49 @@ public sealed unsafe class FFmpegDecoder : IDisposable
 
     public void Open(string url)
     {
+        // Suppress verbose FFmpeg logging (HLS segment open/close, TLS errors)
+        ffmpeg.av_log_set_level(ffmpeg.AV_LOG_ERROR);
+        _currentUrl = url;
         int ret;
+        AVDictionary* opts = null;
+        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            ffmpeg.av_dict_set(&opts, "user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 0);
+            ffmpeg.av_dict_set(&opts, "reconnect", "1", 0);
+            ffmpeg.av_dict_set(&opts, "reconnect_streamed", "1", 0);
+            ffmpeg.av_dict_set(&opts, "reconnect_at_eof", "1", 0);
+            ffmpeg.av_dict_set(&opts, "reconnect_delay_max", "5", 0);
+            ffmpeg.av_dict_set(&opts, "analyzeduration", "100000000", 0);
+            ffmpeg.av_dict_set(&opts, "probesize", "100000000", 0);
+            ffmpeg.av_dict_set(&opts, "fflags", "+discardcorrupt", 0);
+            ffmpeg.av_dict_set(&opts, "rw_timeout", "30000000", 0);
+            ffmpeg.av_dict_set(&opts, "timeout", "30000000", 0);
+            ffmpeg.av_dict_set(&opts, "buffer_size", "1048576", 0);
+            // VLC-like: fresh connection per segment, no persistent HTTP/TLS
+            ffmpeg.av_dict_set(&opts, "http_persistent", "0", 0);
+            ffmpeg.av_dict_set(&opts, "http_multiple", "0", 0);
+        }
         fixed (AVFormatContext** pFmt = &_fmtCtx)
         {
-            ret = ffmpeg.avformat_open_input(pFmt, url, null, null);
-            if (ret < 0) throw new InvalidOperationException($"avformat_open_input failed: {ret}");
+            ret = ffmpeg.avformat_open_input(pFmt, url, null, &opts);
+            if (opts != null) ffmpeg.av_dict_free(&opts);
+            if (ret < 0)
+            {
+                _fmtCtx = null;
+                throw new InvalidOperationException($"avformat_open_input failed: {ret}");
+            }
         }
         ret = ffmpeg.avformat_find_stream_info(_fmtCtx, null);
-        if (ret < 0) throw new InvalidOperationException($"avformat_find_stream_info failed: {ret}");
+        if (ret < 0)
+        {
+            Dispose();
+            throw new InvalidOperationException($"avformat_find_stream_info failed: {ret}");
+        }
+
+        // Increase internal packet buffer for smoother HLS segment transitions
+        _fmtCtx->max_analyze_duration = 100_000_000;
+        _fmtCtx->probesize = 100_000_000;
 
         for (int i = 0; i < _fmtCtx->nb_streams; i++)
         {
@@ -131,13 +168,38 @@ public sealed unsafe class FFmpegDecoder : IDisposable
 
     /// <summary>
     /// Read next packet. Returns false on EOF.
+    /// Retries on transient network errors (EAGAIN, EINTR).
     /// </summary>
     public bool ReadPacket(out int streamIndex)
     {
-        int ret = ffmpeg.av_read_frame(_fmtCtx, _packet);
-        if (ret < 0) { streamIndex = -1; return false; }
-        streamIndex = _packet->stream_index;
-        return true;
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            int ret = ffmpeg.av_read_frame(_fmtCtx, _packet);
+            if (ret >= 0)
+            {
+                streamIndex = _packet->stream_index;
+                return true;
+            }
+            // AVERROR_EOF or AVERROR_EXIT — genuine end
+            if (ret == ffmpeg.AVERROR_EOF || ret == ffmpeg.AVERROR_EXIT)
+                break;
+            // Network error — try reconnect after a few retries
+            Console.Error.WriteLine($"[Decoder] ReadPacket error ret={ret}, attempt {attempt + 1}/5");
+            if (attempt >= 2)
+            {
+                Console.Error.WriteLine($"[Decoder] Attempting reconnect...");
+                Thread.Sleep(1000 * (attempt - 1));
+                if (Reconnect())
+                {
+                    Console.Error.WriteLine($"[Decoder] Reconnect succeeded, retrying read");
+                    continue;
+                }
+                Console.Error.WriteLine($"[Decoder] Reconnect failed");
+            }
+            Thread.Sleep(500 * (attempt + 1));
+        }
+        streamIndex = -1;
+        return false;
     }
 
     /// <summary>
@@ -233,9 +295,14 @@ public sealed unsafe class FFmpegDecoder : IDisposable
 
     public double GetVideoFramePts()
     {
-        if (_frame->pts == ffmpeg.AV_NOPTS_VALUE) return 0;
+        long pts = _frame->pts;
+        if (pts == ffmpeg.AV_NOPTS_VALUE)
+            pts = _frame->best_effort_timestamp;
+        if (pts == ffmpeg.AV_NOPTS_VALUE)
+            pts = _frame->pkt_dts;
+        if (pts == ffmpeg.AV_NOPTS_VALUE) return 0;
         var tb = _fmtCtx->streams[VideoStreamIndex]->time_base;
-        return _frame->pts * tb.num / (double)tb.den;
+        return pts * tb.num / (double)tb.den;
     }
 
     public double GetAudioFramePts()
@@ -322,10 +389,42 @@ public sealed unsafe class FFmpegDecoder : IDisposable
 
     public bool Seek(double targetSec)
     {
+        _lastSeekPos = targetSec;
         long targetTs = (long)(targetSec / ffmpeg.av_q2d(_fmtCtx->streams[VideoStreamIndex]->time_base));
         int ret = ffmpeg.av_seek_frame(_fmtCtx, VideoStreamIndex, targetTs, ffmpeg.AVSEEK_FLAG_BACKWARD);
         if (ret < 0) return false;
         FlushDecoders();
+        return true;
+    }
+
+    /// <summary>
+    /// Reconnect to the current stream after a network error (e.g. TLS reset).
+    /// Disposes and re-opens the format context, then seeks to the last known position.
+    /// </summary>
+    public bool Reconnect()
+    {
+        if (string.IsNullOrEmpty(_currentUrl)) return false;
+        double pos = _lastSeekPos;
+        int savedVideo = VideoStreamIndex;
+        int savedAudio = AudioStreamIndex;
+
+        Dispose();
+        VideoStreamIndex = savedVideo;
+        AudioStreamIndex = savedAudio;
+
+        try
+        {
+            Open(_currentUrl);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (pos > 0)
+        {
+            Seek(pos);
+        }
         return true;
     }
 
@@ -337,14 +436,16 @@ public sealed unsafe class FFmpegDecoder : IDisposable
 
     public void Dispose()
     {
-        if (_frame != null) { fixed (AVFrame** p = &_frame) ffmpeg.av_frame_free(p); }
-        if (_swFrame != null) { fixed (AVFrame** p = &_swFrame) ffmpeg.av_frame_free(p); }
-        if (_packet != null) { fixed (AVPacket** p = &_packet) ffmpeg.av_packet_free(p); }
-        if (_swsCtx != null) ffmpeg.sws_freeContext(_swsCtx);
-        if (_swrCtx != null) fixed (SwrContext** p = &_swrCtx) ffmpeg.swr_free(p);
-        if (_hwDeviceCtx != null) fixed (AVBufferRef** p = &_hwDeviceCtx) ffmpeg.av_buffer_unref(p);
-        if (_vCodecCtx != null) fixed (AVCodecContext** p = &_vCodecCtx) ffmpeg.avcodec_free_context(p);
-        if (_aCodecCtx != null) fixed (AVCodecContext** p = &_aCodecCtx) ffmpeg.avcodec_free_context(p);
-        if (_fmtCtx != null) fixed (AVFormatContext** p = &_fmtCtx) ffmpeg.avformat_close_input(p);
+        if (_frame != null) { fixed (AVFrame** p = &_frame) ffmpeg.av_frame_free(p); _frame = null; }
+        if (_swFrame != null) { fixed (AVFrame** p = &_swFrame) ffmpeg.av_frame_free(p); _swFrame = null; }
+        if (_packet != null) { fixed (AVPacket** p = &_packet) ffmpeg.av_packet_free(p); _packet = null; }
+        if (_swsCtx != null) { ffmpeg.sws_freeContext(_swsCtx); _swsCtx = null; }
+        if (_swrCtx != null) { fixed (SwrContext** p = &_swrCtx) ffmpeg.swr_free(p); _swrCtx = null; }
+        if (_hwDeviceCtx != null) { fixed (AVBufferRef** p = &_hwDeviceCtx) ffmpeg.av_buffer_unref(p); _hwDeviceCtx = null; }
+        if (_vCodecCtx != null) { fixed (AVCodecContext** p = &_vCodecCtx) ffmpeg.avcodec_free_context(p); _vCodecCtx = null; }
+        if (_aCodecCtx != null) { fixed (AVCodecContext** p = &_aCodecCtx) ffmpeg.avcodec_free_context(p); _aCodecCtx = null; }
+        if (_fmtCtx != null) { fixed (AVFormatContext** p = &_fmtCtx) ffmpeg.avformat_close_input(p); _fmtCtx = null; }
+        VideoStreamIndex = -1;
+        AudioStreamIndex = -1;
     }
 }

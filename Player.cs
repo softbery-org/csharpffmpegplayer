@@ -14,13 +14,13 @@ public sealed class Player : IDisposable
 
     private readonly object _audioLock = new();
     private readonly Queue<byte[]> _audioQueue = new();
-    private const int MaxAudioQueueBytes = 384_000; // ~1s at 48kHz stereo s16
+    private const int MaxAudioQueueBytes = 4_000_000; // ~10s at 48kHz stereo s16
     private byte[]? _audioPartial;
     private int _audioPartialOffset;
 
     private readonly object _videoLock = new();
     private readonly Queue<VideoFrame> _videoQueue = new();
-    private const int MaxVideoQueue = 5;
+    private const int MaxVideoQueue = 30;
 
     private volatile bool _running = true;
     private volatile bool _decodeRunning = false;
@@ -50,11 +50,14 @@ public sealed class Player : IDisposable
     private bool _uiHidden;
     private int _hoveredButton = -1;
     private string? _pendingOpenFile;
+    private int _pendingPrevNext;
     private volatile bool _stopRequested;
     private bool _forceRedraw;
     private VideoFrame? _lastFrame;
     private bool _stopped;
     private bool _trackEnded;
+    private long _trackOpenTicks; // Environment.TickCount64 when track opened
+    private long _lastReopenTicks; // Track last re-open to prevent tight loops
 
     // Thumbnail preview
     private long   _thumbRequestBits = unchecked((long)0xFFF8000000000000L); // NaN = no request
@@ -86,10 +89,39 @@ public sealed class Player : IDisposable
             _renderer.PlaylistPanelVisible, wx, wy, ww, wh);
     }
 
-    public void Play(string filePath)
+    public void Play(string filePath, PlaylistEntry? entry = null)
     {
         _videoPath = filePath;
-        _decoder.Open(filePath);
+        try
+        {
+            _decoder.UseHwAccel = _useHwAccel;
+            _decoder.Open(filePath);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Player] Initial open failed: {ex.Message}");
+            if (entry != null && !string.IsNullOrEmpty(entry.SourceUrl))
+            {
+                var plugin = PluginLoader.FindPluginForUrl(entry.SourceUrl);
+                if (plugin != null)
+                {
+                    Console.Error.WriteLine($"[Player] Re-extracting from SourceUrl: {entry.SourceUrl}");
+                    var newEntries = plugin.Resolve(entry.SourceUrl);
+                    if (newEntries.Count > 0)
+                    {
+                        entry.Url = newEntries[0].Url;
+                        if (!string.IsNullOrEmpty(newEntries[0].DisplayName))
+                            entry.DisplayName = newEntries[0].DisplayName;
+                        _videoPath = entry.Url;
+                        _decoder.Open(entry.Url);
+                        Console.Error.WriteLine($"[Player] Re-opened with fresh URL");
+                    }
+                    else throw;
+                }
+                else throw;
+            }
+            else throw;
+        }
 
         _videoWidth = _decoder.VideoWidth;
         _videoHeight = _decoder.VideoHeight;
@@ -117,6 +149,7 @@ public sealed class Player : IDisposable
         _trackEof = false;
         _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "Decode" };
         _decodeThread.Start();
+        _trackOpenTicks = Environment.TickCount64;
 
         if (StartPositionSec > 1.0)
         {
@@ -212,7 +245,7 @@ public sealed class Player : IDisposable
                                     if (idx >= 0 && idx < Playlist.Count)
                                     {
                                         Playlist.MoveTo(idx);
-                                        OpenNewFile(Playlist.Current);
+                                        OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                                     }
                                 }
                                 break;
@@ -230,7 +263,7 @@ public sealed class Player : IDisposable
                                             ? -1
                                             : Math.Clamp(sel, 0, Playlist.Count - 1);
                                         if (removingCurrent && Playlist.Count > 0)
-                                            OpenNewFile(Playlist.Current);
+                                            OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                                         else if (removingCurrent)
                                         {
                                             _paused = true;
@@ -305,6 +338,45 @@ public sealed class Player : IDisposable
                                 }
                                 break;
                             }
+                            if (plHit == SDLRenderer.PlaylistPanelHit.AddUrl)
+                            {
+                                string? urlInput = OpenUrlDialog();
+                                ResyncClock();
+                                if (!string.IsNullOrWhiteSpace(urlInput) && Playlist != null)
+                                {
+                                    var lines = urlInput.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                                        .Select(l => l.Trim())
+                                        .Where(l => !l.StartsWith("#")).ToList();
+                                    System.Threading.ThreadPool.QueueUserWorkItem(_ =>
+                                    {
+                                        foreach (var line in lines)
+                                        {
+                                            var plugin = PluginLoader.FindPluginForUrl(line);
+                                            if (plugin != null)
+                                            {
+                                                Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {line}");
+                                                var entries = plugin.Resolve(line);
+                                                lock (Playlist)
+                                                {
+                                                    foreach (var e in entries)
+                                                        Playlist.Add(e);
+                                                }
+                                                Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS");
+                                            }
+                                            else if (line.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                                                     line.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                                            {
+                                                lock (Playlist)
+                                                {
+                                                    Playlist.Add(line);
+                                                }
+                                            }
+                                        }
+                                        _forceRedraw = true;
+                                    });
+                                }
+                                break;
+                            }
                             if (plHit == SDLRenderer.PlaylistPanelHit.ClearPlaylist)
                             {
                                 if (Playlist != null)
@@ -313,6 +385,22 @@ public sealed class Player : IDisposable
                                     _renderer.PlaylistSelectedIndex = -1;
                                     _paused = true;
                                     _clock.Stop();
+                                    _decodeRunning = false;
+                                    _renderer.StopAudio();
+                                    lock (_videoLock) { Monitor.PulseAll(_videoLock); }
+                                    lock (_audioLock) { Monitor.PulseAll(_audioLock); }
+                                    if (_decodeThread != null && _decodeThread.IsAlive)
+                                        _decodeThread.Join(3000);
+                                    _decoder.Dispose();
+                                    _clockStarted = false;
+                                    _trackEnded = true;
+                                    _trackEof = false;
+                                    _duration = 0;
+                                    ClearQueues();
+                                    _lastFrame?.Dispose();
+                                    _lastFrame = null;
+                                    _renderer.Duration = 0;
+                                    _renderer.SetProgress(0);
                                     _forceRedraw = true;
                                 }
                                 break;
@@ -412,7 +500,7 @@ public sealed class Player : IDisposable
                                     if (_renderer.PlaylistSelectedIndex == _plDragFromIndex)
                                     {
                                         Playlist.MoveTo(_plDragFromIndex);
-                                        OpenNewFile(Playlist.Current);
+                                        OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                                     }
                                     else
                                     {
@@ -500,6 +588,15 @@ public sealed class Player : IDisposable
                 OpenNewFile(file);
             }
 
+            if (_pendingPrevNext != 0 && Playlist != null)
+            {
+                int dir = _pendingPrevNext;
+                _pendingPrevNext = 0;
+                bool advanced = dir > 0 ? Playlist.AdvanceToNext() : Playlist.AdvanceToPrev();
+                if (advanced)
+                    OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
+            }
+
             if (_stopRequested)
             {
                 _stopRequested = false;
@@ -513,17 +610,21 @@ public sealed class Player : IDisposable
             // Either clock reaches end, OR decoder hit EOF and audio queue fully drained
             // _clockStarted guard prevents instant trigger on startup seek near EOF
             // _pendingOpenFile guard prevents double-open when user opened a file in same frame
-            bool eofDrained = _trackEof && _clockStarted && _audioQueue.Count == 0 && _pendingOpenFile == null;
+            // Guard: don't auto-advance if track opened less than 3s ago (likely broken stream)
+            long trackAge = Environment.TickCount64 - _trackOpenTicks;
+            long sinceReopen = Environment.TickCount64 - _lastReopenTicks;
+            bool eofDrained = _trackEof && _clockStarted && _audioQueue.Count == 0 && _pendingOpenFile == null
+                              && trackAge > 3000 && sinceReopen > 5000;
             bool clockEnd   = _clockStarted && _duration > 1.0 && GetMasterClock() >= _duration - 0.15;
             if (!_trackEnded && (clockEnd || eofDrained))
             {
                 _trackEnded = true;
-                if (Playlist != null)
+                if (Playlist != null && Playlist.Count > 0)
                 {
                     bool advanced = Playlist.AdvanceToNext();
                     if (advanced)
                     {
-                        OpenNewFile(Playlist.Current);
+                        OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                     }
                     else
                     {
@@ -547,7 +648,7 @@ public sealed class Player : IDisposable
             if (!_uiHidden && _hoveredButton == -1 && Environment.TickCount64 - _lastMouseMotionTicks > AutoHideMs)
                 HideUI();
 
-            int sleepMs = _targetFps > 0 ? Math.Max(1, 1000 / _targetFps - 2) : 5;
+            int sleepMs = _targetFps > 0 ? Math.Max(1, 1000 / _targetFps - 2) : 2;
             Thread.Sleep(sleepMs);
         }
     }
@@ -556,33 +657,35 @@ public sealed class Player : IDisposable
     {
         if (_decoder.VideoStreamIndex < 0) return;
 
-        VideoFrame? frame = null;
+        // Drain all frames that are due, render the latest one
+        VideoFrame? frameToRender = null;
         lock (_videoLock)
         {
-            if (_videoQueue.Count > 0)
-                frame = _videoQueue.Dequeue();
+            while (_videoQueue.Count > 0)
+            {
+                var f = _videoQueue.Dequeue();
+                double delay = f.Pts - GetMasterClock();
+
+                if (delay > 0.02)
+                {
+                    // This frame is in the future — put it back and stop
+                    _videoQueue.Enqueue(f);
+                    break;
+                }
+
+                // Frame is due (or past due) — dispose previous candidate, keep latest
+                if (frameToRender.HasValue)
+                    frameToRender.Value.Dispose();
+                frameToRender = f;
+            }
         }
 
-        if (frame == null) return;
+        if (frameToRender == null) return;
 
-        double delay = frame.Value.Pts - GetMasterClock();
-        if (delay > 0.01)
-        {
-            // Too early — put it back and wait
-            lock (_videoLock) _videoQueue.Enqueue(frame.Value);
-            return;
-        }
-        else if (delay < -0.1)
-        {
-            // Too late — drop this frame, try next
-            frame.Value.Dispose();
-            return;
-        }
-
-        _renderer.UpdateVideoFrame(frame.Value.YPlane, frame.Value.UPlane, frame.Value.VPlane,
-            frame.Value.YStride, frame.Value.UVStride);
+        _renderer.UpdateVideoFrame(frameToRender.Value.YPlane, frameToRender.Value.UPlane, frameToRender.Value.VPlane,
+            frameToRender.Value.YStride, frameToRender.Value.UVStride);
         _lastFrame?.Dispose();
-        _lastFrame = frame;
+        _lastFrame = frameToRender;
     }
 
     private void RedrawLastFrame()
@@ -637,6 +740,12 @@ public sealed class Player : IDisposable
                 while (_decoder.ReceiveVideoFrame())
                 {
                     double pts = _decoder.GetVideoFramePts();
+                    if (!_clockStarted)
+                    {
+                        _clockBasePts = pts;
+                        _clock.Restart();
+                        _clockStarted = true;
+                    }
                     var vf = VideoFrame.FromDecoder(_decoder, _videoWidth, _videoHeight);
                     var vfWithPts = new VideoFrame(pts, vf.YPlane, vf.UPlane, vf.VPlane, vf.YStride, vf.UVStride);
                     lock (_videoLock)
@@ -652,12 +761,8 @@ public sealed class Player : IDisposable
                 while (_decoder.ReceiveAudioFrame())
                 {
                     _audioPts = _decoder.GetAudioFramePts();
-                    if (!_clockStarted)
-                    {
-                        _clockBasePts = _audioPts;
-                        _clock.Restart();
-                        _clockStarted = true;
-                    }
+                    // Audio clock takes over as master if video started it first
+                    // (rebase to audio PTS for better A/V sync)
                     var pcm = _decoder.CopyAudioFrame();
                     if (pcm.Length > 0)
                     {
@@ -689,6 +794,9 @@ public sealed class Player : IDisposable
     {
         switch (btn)
         {
+            case SDLRenderer.ControlButton.Prev:
+                _pendingPrevNext = -1;
+                break;
             case SDLRenderer.ControlButton.PlayPause:
                 if (_stopped)
                 {
@@ -706,6 +814,9 @@ public sealed class Player : IDisposable
                     else _clock.Start();
                 }
                 _forceRedraw = true;
+                break;
+            case SDLRenderer.ControlButton.Next:
+                _pendingPrevNext = 1;
                 break;
             case SDLRenderer.ControlButton.Stop:
                 _stopRequested = true;
@@ -729,8 +840,14 @@ public sealed class Player : IDisposable
             _lastMouseMotionTicks = Environment.TickCount64;
     }
 
-    private void OpenNewFile(string filePath)
+    private void OpenNewFile(string filePath, PlaylistEntry? entry = null)
     {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            Console.Error.WriteLine("[Player] OpenNewFile: empty filePath, skipping");
+            return;
+        }
+        _lastReopenTicks = Environment.TickCount64;
         Console.Error.WriteLine($"[Player] OpenNewFile: {filePath}");
 
         // Stop decode thread safely — do NOT set _running=false (that exits EventLoop)
@@ -770,8 +887,45 @@ public sealed class Player : IDisposable
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[Player] Open failed: {ex.Message}");
+
+            // Try re-extracting URL from SourceUrl via plugin (e.g. expired HLS link)
+            if (entry != null && !string.IsNullOrEmpty(entry.SourceUrl))
+            {
+                var plugin = PluginLoader.FindPluginForUrl(entry.SourceUrl);
+                if (plugin != null)
+                {
+                    Console.Error.WriteLine($"[Player] Re-extracting from SourceUrl: {entry.SourceUrl}");
+                    try
+                    {
+                        var newEntries = plugin.Resolve(entry.SourceUrl);
+                        if (newEntries.Count > 0)
+                        {
+                            var fresh = newEntries[0];
+                            Console.Error.WriteLine($"[Player] Got fresh URL: {fresh.Url}");
+                            // Update the playlist entry in-place
+                            entry.Url = fresh.Url;
+                            if (!string.IsNullOrEmpty(fresh.DisplayName))
+                                entry.DisplayName = fresh.DisplayName;
+                            // Retry opening with fresh URL
+                            _decoder.Open(fresh.Url);
+                            Console.Error.WriteLine($"[Player] Re-opened: video={_decoder.VideoStreamIndex} audio={_decoder.AudioStreamIndex} dur={_decoder.DurationSec:F1}s");
+                            goto opened;
+                        }
+                    }
+                    catch (Exception ex2)
+                    {
+                        Console.Error.WriteLine($"[Player] Re-extraction failed: {ex2.Message}");
+                    }
+                }
+            }
+
+            _trackEnded = true; // prevent auto-advance loop on failed open
+            _decodeRunning = false;
+            _renderer.ShowError($"Błąd odtwarzania:\n{Path.GetFileName(filePath)}\n{ex.Message}");
             return;
         }
+
+        opened:
 
         _videoWidth  = _decoder.VideoWidth;
         _videoHeight = _decoder.VideoHeight;
@@ -811,6 +965,7 @@ public sealed class Player : IDisposable
 
         _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "Decode" };
         _decodeThread.Start();
+        _trackOpenTicks = Environment.TickCount64;
         Console.Error.WriteLine($"[Player] DecodeThread started");
     }
 
@@ -886,7 +1041,7 @@ public sealed class Player : IDisposable
         {
             case SDLRenderer.ContextMenuAction.Play:
                 Playlist.MoveTo(itemIndex);
-                OpenNewFile(Playlist.Current);
+                OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                 break;
             case SDLRenderer.ContextMenuAction.PlayNext:
                 // Insert item right after current playing index
@@ -920,14 +1075,14 @@ public sealed class Player : IDisposable
     {
         if (Playlist == null || !Playlist.HasNext) return;
         Playlist.MoveNext();
-        OpenNewFile(Playlist.Current);
+        OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
     }
 
     private void PlayPrev()
     {
         if (Playlist == null || !Playlist.HasPrev) return;
         Playlist.MovePrev();
-        OpenNewFile(Playlist.Current);
+        OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
     }
 
     private void UpdateSubtitle()
@@ -945,13 +1100,18 @@ public sealed class Player : IDisposable
 
     private void UpdatePlaylistPanel()
     {
-        if (Playlist == null || Playlist.Count == 0) return;
-        var files = Playlist.Files;
-        var names = new string[files.Count];
-        var durations = new double[files.Count];
-        for (int i = 0; i < files.Count; i++)
+        if (Playlist == null) return;
+        if (Playlist.Count == 0)
         {
-            names[i] = System.IO.Path.GetFileNameWithoutExtension(files[i]);
+            _renderer.SetPlaylistData(Array.Empty<string>(), Array.Empty<double>(), -1, 0);
+            return;
+        }
+        var entries = Playlist.Entries;
+        var names = new string[entries.Count];
+        var durations = new double[entries.Count];
+        for (int i = 0; i < entries.Count; i++)
+        {
+            names[i] = entries[i].DisplayName;
             durations[i] = i == Playlist.CurrentIndex ? _duration : 0;
         }
         _renderer.SetPlaylistData(names, durations, Playlist.CurrentIndex, GetMasterClock());
@@ -1036,6 +1196,37 @@ public sealed class Player : IDisposable
         return null;
     }
 
+    private static string? OpenUrlDialog()
+    {
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = "zenity",
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("--text-info");
+            psi.ArgumentList.Add("--title=Wklej URL-e (HLS lub inne)");
+            psi.ArgumentList.Add("--editable");
+            psi.ArgumentList.Add("--width=600");
+            psi.ArgumentList.Add("--height=400");
+            var proc = Process.Start(psi);
+            if (proc == null) return null;
+            string output = proc.StandardOutput.ReadToEnd().Trim();
+            proc.WaitForExit(120000);
+            if (proc.ExitCode == 0 && !string.IsNullOrEmpty(output))
+                return output;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"URL dialog error: {ex.Message}");
+        }
+        return null;
+    }
+
     private void ToggleFullscreen()
     {
         _fullscreen = !_fullscreen;
@@ -1076,7 +1267,7 @@ public sealed class Player : IDisposable
         int margin = 20;
         _renderer.GetWindowGeometry(out _, out _, out int winW, out _);
         int barW = winW - margin * 2;
-        bool onTrack = y >= barY && y <= barY + 70 && x >= margin && x <= margin + barW;
+        bool onTrack = y >= barY && y <= _renderer.GetWindowHeight() && x >= margin && x <= margin + barW;
         if (!onTrack) { _renderer.ProgressHoverTime = -1; return; }
 
         double hoverTime = Math.Clamp((x - margin) / (double)barW * _duration, 0, _duration);
@@ -1128,7 +1319,7 @@ public sealed class Player : IDisposable
     private bool IsOnProgressBar(int x, int y)
     {
         int barY = _renderer.GetProgressBarY();
-        return y >= barY - 5 && y <= barY + 65 && x >= 0;
+        return y >= barY && y <= _renderer.GetWindowHeight() && x >= 0;
     }
 
     private void HandleSeekByMouse(int mouseX)

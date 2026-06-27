@@ -21,3 +21,9 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Plugins (built separately, loaded at runtime)
+plugins/*/bin/
+plugins/*/obj/
+bin/Debug/net8.0/plugins/
+bin/Release/net8.0/plugins/

@@ -12,16 +12,17 @@ public enum RepeatMode
 
 public sealed class Playlist
 {
-    private readonly List<string> _files = new();
+    private readonly List<PlaylistEntry> _entries = new();
     private int _currentIndex;
     private readonly Random _rng = new();
 
-    public int Count => _files.Count;
+    public int Count => _entries.Count;
     public int CurrentIndex => _currentIndex;
-    public string Current => _currentIndex >= 0 && _currentIndex < _files.Count ? _files[_currentIndex] : "";
-    public bool HasNext => _currentIndex < _files.Count - 1;
+    public PlaylistEntry? CurrentEntry => _currentIndex >= 0 && _currentIndex < _entries.Count ? _entries[_currentIndex] : null;
+    public string Current => CurrentEntry?.Url ?? "";
+    public bool HasNext => _currentIndex < _entries.Count - 1;
     public bool HasPrev => _currentIndex > 0;
-    public IReadOnlyList<string> Files => _files;
+    public IReadOnlyList<PlaylistEntry> Entries => _entries;
     public RepeatMode RepeatMode { get; set; } = RepeatMode.Once;
 
     public Playlist()
@@ -29,16 +30,42 @@ public sealed class Playlist
         _currentIndex = -1;
     }
 
-    public void Add(string file)
+    public void Add(string file, string? displayName = null, string? sourceUrl = null)
     {
-        if (File.Exists(file))
-            _files.Add(Path.GetFullPath(file));
+        if (string.IsNullOrWhiteSpace(file)) return;
+        if (file.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+            file.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            _entries.Add(new PlaylistEntry(file, displayName, sourceUrl));
+        }
+        else if (File.Exists(file))
+        {
+            _entries.Add(new PlaylistEntry(Path.GetFullPath(file), displayName, sourceUrl));
+        }
+    }
+
+    public void Add(PlaylistEntry entry)
+    {
+        if (string.IsNullOrWhiteSpace(entry.Url)) return;
+        _entries.Add(entry);
+    }
+
+    public void AddUrl(string url, string? displayName = null, string? sourceUrl = null)
+    {
+        if (string.IsNullOrWhiteSpace(url)) return;
+        _entries.Add(new PlaylistEntry(url, displayName, sourceUrl));
     }
 
     public void AddRange(IEnumerable<string> files)
     {
         foreach (var f in files)
             Add(f);
+    }
+
+    public void AddRange(IEnumerable<PlaylistEntry> entries)
+    {
+        foreach (var e in entries)
+            Add(e);
     }
 
     private static readonly string[] MediaExtensions =
@@ -65,7 +92,7 @@ public sealed class Playlist
         if (m3u8Files.Count > 0)
         {
             foreach (var m in m3u8Files)
-                if (File.Exists(m)) _files.Add(Path.GetFullPath(m));
+                if (File.Exists(m)) _entries.Add(new PlaylistEntry(Path.GetFullPath(m)));
             // Still recurse into subdirs but skip this folder's .ts segments
             foreach (var sub in Directory.EnumerateDirectories(folderPath).OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
                 AddFolderRecursive(sub);
@@ -77,7 +104,7 @@ public sealed class Playlist
             .Where(f => MediaExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()))
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase);
         foreach (var f in files)
-            _files.Add(Path.GetFullPath(f));
+            _entries.Add(new PlaylistEntry(Path.GetFullPath(f)));
 
         foreach (var sub in Directory.EnumerateDirectories(folderPath).OrderBy(d => d, StringComparer.OrdinalIgnoreCase))
             AddFolderRecursive(sub);
@@ -96,22 +123,45 @@ public sealed class Playlist
     // Returns true if advanced to next track, false if playlist ended
     public bool AdvanceToNext()
     {
-        if (_files.Count == 0) return false;
+        if (_entries.Count == 0) return false;
         switch (RepeatMode)
         {
             case RepeatMode.One:
-                return true; // stay on same index
+                return true;
             case RepeatMode.Shuffle:
                 int next;
-                do { next = _rng.Next(_files.Count); } while (_files.Count > 1 && next == _currentIndex);
+                do { next = _rng.Next(_entries.Count); } while (_entries.Count > 1 && next == _currentIndex);
                 _currentIndex = next;
                 return true;
             case RepeatMode.All:
-                _currentIndex = (_currentIndex + 1) % _files.Count;
+                _currentIndex = (_currentIndex + 1) % _entries.Count;
                 return true;
             case RepeatMode.Once:
             default:
-                if (_currentIndex < _files.Count - 1) { _currentIndex++; return true; }
+                if (_currentIndex < _entries.Count - 1) { _currentIndex++; return true; }
+                return false;
+        }
+    }
+
+    // Returns true if advanced to prev track, false if at start
+    public bool AdvanceToPrev()
+    {
+        if (_entries.Count == 0) return false;
+        switch (RepeatMode)
+        {
+            case RepeatMode.One:
+                return true;
+            case RepeatMode.Shuffle:
+                int prev;
+                do { prev = _rng.Next(_entries.Count); } while (_entries.Count > 1 && prev == _currentIndex);
+                _currentIndex = prev;
+                return true;
+            case RepeatMode.All:
+                _currentIndex = (_currentIndex - 1 + _entries.Count) % _entries.Count;
+                return true;
+            case RepeatMode.Once:
+            default:
+                if (_currentIndex > 0) { _currentIndex--; return true; }
                 return false;
         }
     }
@@ -132,26 +182,26 @@ public sealed class Playlist
 
     public void MoveTo(int index)
     {
-        if (index >= 0 && index < _files.Count)
+        if (index >= 0 && index < _entries.Count)
             _currentIndex = index;
     }
 
     public void Reset()
     {
-        _currentIndex = _files.Count > 0 ? 0 : -1;
+        _currentIndex = _entries.Count > 0 ? 0 : -1;
     }
 
     public void Clear()
     {
-        _files.Clear();
+        _entries.Clear();
         _currentIndex = -1;
     }
 
     public void RemoveAt(int index)
     {
-        if (index < 0 || index >= _files.Count) return;
-        _files.RemoveAt(index);
-        if (_files.Count == 0)
+        if (index < 0 || index >= _entries.Count) return;
+        _entries.RemoveAt(index);
+        if (_entries.Count == 0)
         {
             _currentIndex = -1;
             return;
@@ -159,19 +209,19 @@ public sealed class Playlist
         if (_currentIndex > index)
             _currentIndex--;
         else if (_currentIndex == index)
-            _currentIndex = Math.Min(_currentIndex, _files.Count - 1);
+            _currentIndex = Math.Min(_currentIndex, _entries.Count - 1);
     }
 
     // Move item from fromIndex to toIndex, adjust currentIndex
     public void Move(int fromIndex, int toIndex)
     {
-        if (fromIndex < 0 || fromIndex >= _files.Count) return;
-        if (toIndex < 0 || toIndex >= _files.Count) return;
+        if (fromIndex < 0 || fromIndex >= _entries.Count) return;
+        if (toIndex < 0 || toIndex >= _entries.Count) return;
         if (fromIndex == toIndex) return;
 
-        string item = _files[fromIndex];
-        _files.RemoveAt(fromIndex);
-        _files.Insert(toIndex, item);
+        var item = _entries[fromIndex];
+        _entries.RemoveAt(fromIndex);
+        _entries.Insert(toIndex, item);
 
         // Adjust current index
         if (_currentIndex == fromIndex)
@@ -184,5 +234,11 @@ public sealed class Playlist
         {
             if (_currentIndex >= toIndex && _currentIndex < fromIndex) _currentIndex++;
         }
+    }
+
+    public string GetDisplayName(int index)
+    {
+        if (index < 0 || index >= _entries.Count) return "";
+        return _entries[index].DisplayName;
     }
 }
