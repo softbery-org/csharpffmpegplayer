@@ -103,6 +103,11 @@ class Program
 
         try
         {
+            using (var splash = new SplashScreen())
+            {
+                splash.Show();
+            }
+
             PluginLoader.LoadPlugins();
 
             var playlist = new Playlist();
