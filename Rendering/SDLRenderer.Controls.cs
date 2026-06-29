@@ -13,7 +13,7 @@ public sealed partial class SDLRenderer
         {
             int dx = x - _overlayButtonXs[i];
             int dy = y - _overlayButtonY;
-            int r = (i == 1) ? 28 : 22;
+            int r = (i == 1) ? 52 : 32;
             if (dx * dx + dy * dy <= r * r)
                 return (ControlButton)(i + 1);
         }
@@ -27,11 +27,11 @@ public sealed partial class SDLRenderer
 
     private void DrawControls()
     {
-        ControlButton[] buttons = { ControlButton.Prev, ControlButton.PlayPause, ControlButton.Next, ControlButton.Stop, ControlButton.OpenFile };
+        ControlButton[] buttons = { ControlButton.Prev, ControlButton.PlayPause, ControlButton.Next };
         int n = buttons.Length;
         int centerX = _windowW / 2;
         int centerY = _windowH / 2;
-        int spacing = 64;
+        int spacing = 110;
         int totalW = (n - 1) * spacing;
         int startX = centerX - totalW / 2;
 
@@ -47,18 +47,20 @@ public sealed partial class SDLRenderer
             int bx = _overlayButtonXs[i];
             bool hovered = _hoveredButton == i;
             bool isPlayPause = buttons[i] == ControlButton.PlayPause;
-            int r = isPlayPause ? 26 : 20;
+            int r = isPlayPause ? 50 : 30;
             byte iconAlpha = hovered ? (byte)255 : (byte)200;
 
-            // Circle background
-            byte bgAlpha = hovered ? (byte)120 : (byte)50;
-            byte bgR = hovered ? (byte)80 : (byte)20;
-            byte bgG = hovered ? (byte)160 : (byte)20;
-            byte bgB = hovered ? (byte)255 : (byte)30;
+            // Circle background (gray tones)
+            byte bgAlpha = hovered ? (byte)140 : (byte)60;
+            byte bgR = hovered ? (byte)100 : (byte)50;
+            byte bgG = hovered ? (byte)110 : (byte)55;
+            byte bgB = hovered ? (byte)120 : (byte)60;
             if (isPlayPause)
             {
-                bgAlpha = hovered ? (byte)200 : (byte)100;
-                bgR = 80; bgG = 160; bgB = 255;
+                bgAlpha = hovered ? (byte)180 : (byte)90;
+                bgR = hovered ? (byte)110 : (byte)60;
+                bgG = hovered ? (byte)120 : (byte)65;
+                bgB = hovered ? (byte)130 : (byte)70;
             }
             SDL.SDL_SetRenderDrawColor(_renderer, bgR, bgG, bgB, bgAlpha);
             for (int dy = -r; dy <= r; dy++)
@@ -68,19 +70,25 @@ public sealed partial class SDLRenderer
                 SDL.SDL_RenderFillRect(_renderer, ref row);
             }
 
-            // Circle outline
-            SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, hovered ? (byte)200 : (byte)80);
-            for (int dy = -r; dy <= r; dy++)
+            // Circle outline (only for center PlayPause button)
+            if (isPlayPause)
             {
-                int dx = (int)Math.Sqrt(r * r - dy * dy);
-                int innerR = r - 1;
-                int innerDx = innerR > 0 && Math.Abs(dy) <= innerR
-                    ? (int)Math.Sqrt(innerR * innerR - dy * dy)
-                    : 0;
-                if (dx > innerDx)
+                byte outlineAlpha = hovered ? (byte)230 : (byte)120;
+                SDL.SDL_SetRenderDrawColor(_renderer, 210, 210, 215, outlineAlpha);
+                for (int dy = -r; dy <= r; dy++)
                 {
-                    SDL.SDL_RenderDrawPoint(_renderer, bx - dx, centerY + dy);
-                    SDL.SDL_RenderDrawPoint(_renderer, bx + dx, centerY + dy);
+                    int dx = (int)Math.Sqrt(r * r - dy * dy);
+                    int innerR = r - 4;
+                    int innerDx = innerR > 0 && Math.Abs(dy) <= innerR
+                        ? (int)Math.Sqrt(innerR * innerR - dy * dy)
+                        : 0;
+                    if (dx > innerDx)
+                    {
+                        var rowL = new SDL.SDL_Rect { x = bx - dx, y = centerY + dy, w = dx - innerDx, h = 1 };
+                        SDL.SDL_RenderFillRect(_renderer, ref rowL);
+                        var rowR = new SDL.SDL_Rect { x = bx + innerDx, y = centerY + dy, w = dx - innerDx, h = 1 };
+                        SDL.SDL_RenderFillRect(_renderer, ref rowR);
+                    }
                 }
             }
 
@@ -98,12 +106,6 @@ public sealed partial class SDLRenderer
                 case ControlButton.Next:
                     DrawNextIcon(bx, centerY, iconAlpha);
                     break;
-                case ControlButton.Stop:
-                    DrawStopIcon(bx, centerY, iconAlpha);
-                    break;
-                case ControlButton.OpenFile:
-                    DrawOpenFileIcon(bx, centerY, iconAlpha);
-                    break;
             }
         }
 
@@ -113,8 +115,8 @@ public sealed partial class SDLRenderer
     private void DrawPlayIcon(int cx, int cy, byte alpha)
     {
         SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
-        int s = 9;
-        int offset = 3;
+        int s = 22;
+        int offset = 7;
         for (int dy = -s; dy <= s; dy++)
         {
             int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
@@ -126,31 +128,23 @@ public sealed partial class SDLRenderer
     private void DrawPauseIcon(int cx, int cy, byte alpha)
     {
         SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
-        int barW = 4, barH = 16;
-        var left = new SDL.SDL_Rect { x = cx - barW - 1, y = cy - barH / 2, w = barW, h = barH };
-        var right = new SDL.SDL_Rect { x = cx + 1, y = cy - barH / 2, w = barW, h = barH };
+        int barW = 10, barH = 37;
+        var left = new SDL.SDL_Rect { x = cx - barW - 3, y = cy - barH / 2, w = barW, h = barH };
+        var right = new SDL.SDL_Rect { x = cx + 3, y = cy - barH / 2, w = barW, h = barH };
         SDL.SDL_RenderFillRect(_renderer, ref left);
         SDL.SDL_RenderFillRect(_renderer, ref right);
-    }
-
-    private void DrawStopIcon(int cx, int cy, byte alpha)
-    {
-        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
-        int s = 8;
-        var r = new SDL.SDL_Rect { x = cx - s, y = cy - s, w = s * 2, h = s * 2 };
-        SDL.SDL_RenderFillRect(_renderer, ref r);
     }
 
     private void DrawPrevIcon(int cx, int cy, byte alpha)
     {
         SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
-        var bar = new SDL.SDL_Rect { x = cx - 7, y = cy - 7, w = 3, h = 14 };
+        var bar = new SDL.SDL_Rect { x = cx - 10, y = cy - 10, w = 4, h = 20 };
         SDL.SDL_RenderFillRect(_renderer, ref bar);
-        int s = 8;
+        int s = 11;
         for (int dy = -s; dy <= s; dy++)
         {
             int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
-            var r = new SDL.SDL_Rect { x = cx + 4 - halfW, y = cy + dy, w = halfW, h = 1 };
+            var r = new SDL.SDL_Rect { x = cx + 6 - halfW, y = cy + dy, w = halfW, h = 1 };
             SDL.SDL_RenderFillRect(_renderer, ref r);
         }
     }
@@ -158,33 +152,15 @@ public sealed partial class SDLRenderer
     private void DrawNextIcon(int cx, int cy, byte alpha)
     {
         SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
-        int s = 8;
+        int s = 11;
         for (int dy = -s; dy <= s; dy++)
         {
             int halfW = (int)(s * (1.0 - (double)Math.Abs(dy) / s));
-            var r = new SDL.SDL_Rect { x = cx - 4, y = cy + dy, w = halfW, h = 1 };
+            var r = new SDL.SDL_Rect { x = cx - 6, y = cy + dy, w = halfW, h = 1 };
             SDL.SDL_RenderFillRect(_renderer, ref r);
         }
-        var bar = new SDL.SDL_Rect { x = cx + 4, y = cy - 7, w = 3, h = 14 };
+        var bar = new SDL.SDL_Rect { x = cx + 6, y = cy - 10, w = 4, h = 20 };
         SDL.SDL_RenderFillRect(_renderer, ref bar);
     }
 
-    private void DrawOpenFileIcon(int cx, int cy, byte alpha)
-    {
-        SDL.SDL_SetRenderDrawColor(_renderer, 230, 230, 230, alpha);
-        int w = 18, h = 14;
-        int fx = cx - w / 2, fy = cy - h / 2;
-        var tab = new SDL.SDL_Rect { x = fx, y = fy, w = 7, h = 3 };
-        SDL.SDL_RenderFillRect(_renderer, ref tab);
-        var body = new SDL.SDL_Rect { x = fx, y = fy + 3, w = w, h = h - 3 };
-        SDL.SDL_RenderFillRect(_renderer, ref body);
-        SDL.SDL_SetRenderDrawColor(_renderer, 30, 30, 30, alpha);
-        int ay = cy + 1;
-        for (int dy = -3; dy <= 3; dy++)
-        {
-            int dx = 3 - Math.Abs(dy);
-            SDL.SDL_RenderDrawPoint(_renderer, cx + dx, ay + dy);
-            if (dx > 0) SDL.SDL_RenderDrawPoint(_renderer, cx + dx - 1, ay + dy);
-        }
-    }
 }

@@ -15,7 +15,7 @@ public sealed partial class SDLRenderer
         string[] lines = _subtitleText.Split('\n');
         int lineH = 28;
         int totalH = lines.Length * lineH;
-        int startY = _windowH - totalH - ProgressBarHeight - 10;
+        int startY = _windowH - totalH - ProgressBarHeight - ProgressBarBottomMargin - 10;
 
         for (int i = 0; i < lines.Length; i++)
         {

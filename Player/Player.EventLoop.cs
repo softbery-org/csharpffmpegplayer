@@ -36,6 +36,12 @@ public sealed partial class Player
                 }
             }
 
+            if (_windowDragging)
+            {
+                _renderer.GetWindowPosition(out int winX, out int winY);
+                _renderer.SetWindowPosition(winX + _mouseX - _windowDragOffsetX, winY + _mouseY - _windowDragOffsetY);
+            }
+
             _renderer.IsPlaying = !_paused;
             _renderer.SetProgress(GetMasterClock());
             UpdatePlaylistPanel();
@@ -50,24 +56,37 @@ public sealed partial class Player
             if (_pendingOpenFile != null)
             {
                 string file = _pendingOpenFile;
+                var entry = _pendingOpenEntry;
                 _pendingOpenFile = null;
-                OpenNewFile(file);
+                _pendingOpenEntry = null;
+                if (!OpenNewFile(file, entry))
+                {
+                    // Open is busy; re-queue for later
+                    _pendingOpenFile = file;
+                    _pendingOpenEntry = entry;
+                }
             }
+
+            ProcessAsyncOpenCompletion();
+            ProcessApiRequests();
 
             if (_pendingPrevNext != 0 && Playlist != null)
             {
                 int dir = _pendingPrevNext;
                 _pendingPrevNext = 0;
                 bool advanced = dir > 0 ? Playlist.AdvanceToNext() : Playlist.AdvanceToPrev();
-                if (advanced)
-                    OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
+                if (advanced && !OpenNewFile(Playlist.Current, Playlist.CurrentEntry))
+                {
+                    // Open is busy; revert index and re-queue the request
+                    if (dir > 0) Playlist.AdvanceToPrev(); else Playlist.AdvanceToNext();
+                    _pendingPrevNext = dir;
+                }
             }
 
             if (_stopRequested)
             {
                 _stopRequested = false;
-                _paused = true;
-                _clock.Stop();
+                SetPaused(true);
                 ClearQueues();
                 _renderer.SetProgress(0);
             }
@@ -75,7 +94,7 @@ public sealed partial class Player
             long trackAge = Environment.TickCount64 - _trackOpenTicks;
             long sinceReopen = Environment.TickCount64 - _lastReopenTicks;
             bool eofDrained = _trackEof && _clockStarted && _audioQueue.Count == 0 && _pendingOpenFile == null
-                              && trackAge > 3000 && sinceReopen > 5000;
+                              && !_asyncOpenPending && trackAge > 3000 && sinceReopen > 5000;
             bool clockEnd   = _clockStarted && _duration > 1.0 && GetMasterClock() >= _duration - 0.15;
             if (!_trackEnded && (clockEnd || eofDrained))
             {
@@ -89,15 +108,13 @@ public sealed partial class Player
                     }
                     else
                     {
-                        _paused = true;
-                        _clock.Stop();
+                        SetPaused(true);
                         Console.Error.WriteLine("[Player] Playlist ended");
                     }
                 }
                 else
                 {
-                    _paused = true;
-                    _clock.Stop();
+                    SetPaused(true);
                 }
             }
 
@@ -132,9 +149,7 @@ public sealed partial class Player
                 _running = false;
                 break;
             case SDL.SDL_Keycode.SDLK_SPACE:
-                _paused = !_paused;
-                if (_paused) _clock.Stop();
-                else _clock.Start();
+                SetPaused(!_paused);
                 _forceRedraw = true;
                 break;
             case SDL.SDL_Keycode.SDLK_LEFT:
@@ -148,6 +163,13 @@ public sealed partial class Player
                 break;
             case SDL.SDL_Keycode.SDLK_p:
                 PlayPrev();
+                break;
+            case SDL.SDL_Keycode.SDLK_t:
+                _renderer.SetAlwaysOnTop(!_renderer.AlwaysOnTop);
+                _forceRedraw = true;
+                break;
+            case SDL.SDL_Keycode.SDLK_f:
+                ToggleFullscreen();
                 break;
             case SDL.SDL_Keycode.SDLK_TAB:
                 _renderer.PlaylistPanelVisible = !_renderer.PlaylistPanelVisible;
@@ -203,8 +225,7 @@ public sealed partial class Player
                             OpenNewFile(Playlist.Current, Playlist.CurrentEntry);
                         else if (removingCurrent)
                         {
-                            _paused = true;
-                            _clock.Stop();
+                            SetPaused(true);
                         }
                         _forceRedraw = true;
                     }
@@ -242,6 +263,7 @@ public sealed partial class Player
             {
                 _windowResizing = true;
                 _resizeEdge = (int)resizeEdge;
+                _lastResizeTicks = 0;
                 _renderer.GetWindowPosition(out _resizeStartWinX, out _resizeStartWinY);
                 _resizeStartW = _renderer.GetWindowWidth();
                 _resizeStartH = _renderer.GetWindowHeight();
@@ -261,14 +283,34 @@ public sealed partial class Player
             _renderer.MinimizeWindow();
             return;
         }
+        if (titleHit == SDLRenderer.TitleBarButton.Maximize)
+        {
+            if (_fullscreen)
+            {
+                _fullscreen = false;
+                _renderer.SetFullscreen(false);
+                if (!_renderer.IsMaximized)
+                    _renderer.MaximizeWindow();
+            }
+            else
+            {
+                _renderer.MaximizeWindow();
+            }
+            return;
+        }
 
         // Window dragging — click on empty title bar area
         if (_renderer.IsInTitleBarDragArea(ev.button.x, ev.button.y))
         {
+            if (_fullscreen)
+            {
+                _fullscreen = false;
+                _renderer.SetFullscreen(false);
+            }
+            _renderer.RestoreWindowForDrag(ev.button.x, ev.button.y);
             _windowDragging = true;
-            _renderer.GetWindowPosition(out int winX, out int winY);
-            _windowDragOffsetX = ev.button.x - winX;
-            _windowDragOffsetY = ev.button.y - winY;
+            _windowDragOffsetX = ev.button.x;
+            _windowDragOffsetY = ev.button.y;
             return;
         }
 
@@ -327,15 +369,16 @@ public sealed partial class Player
         }
         else
         {
-            long now = Environment.TickCount64;
-            if (now - _lastClickTicks < DoubleClickMs)
+            // Potential window drag from video area (windowed mode only)
+            if (!_fullscreen)
             {
-                ToggleFullscreen();
-                _lastClickTicks = 0;
-            }
-            else
-            {
-                _lastClickTicks = now;
+                if (_renderer.IsMaximized)
+                    _renderer.RestoreWindowForDrag(ev.button.x, ev.button.y);
+                _videoDragPending = true;
+                _videoDragStartX = ev.button.x;
+                _videoDragStartY = ev.button.y;
+                _windowDragOffsetX = ev.button.x;
+                _windowDragOffsetY = ev.button.y;
             }
         }
     }
@@ -352,6 +395,22 @@ public sealed partial class Player
         if (_windowDragging)
         {
             _windowDragging = false;
+            _videoDragPending = false;
+            return;
+        }
+        if (_videoDragPending)
+        {
+            _videoDragPending = false;
+            long now = Environment.TickCount64;
+            if (now - _lastClickTicks < DoubleClickMs)
+            {
+                ToggleFullscreen();
+                _lastClickTicks = 0;
+            }
+            else
+            {
+                _lastClickTicks = now;
+            }
             return;
         }
         if (_volDragging)
@@ -399,6 +458,11 @@ public sealed partial class Player
 
         if (_windowResizing)
         {
+            long now = Environment.TickCount64;
+            if (now - _lastResizeTicks < ResizeThrottleMs)
+                return;
+            _lastResizeTicks = now;
+
             int newW = _resizeStartW;
             int newH = _resizeStartH;
             // ev.motion.x/y are window-relative; during resize they represent current mouse pos
@@ -418,7 +482,18 @@ public sealed partial class Player
 
         if (_windowDragging)
         {
-            _renderer.SetWindowPosition(ev.motion.x - _windowDragOffsetX, ev.motion.y - _windowDragOffsetY);
+            _mouseX = ev.motion.x;
+            _mouseY = ev.motion.y;
+            return;
+        }
+
+        if (_videoDragPending)
+        {
+            const int threshold = 3;
+            int dx = ev.motion.x - _videoDragStartX;
+            int dy = ev.motion.y - _videoDragStartY;
+            if (Math.Abs(dx) > threshold || Math.Abs(dy) > threshold)
+                _windowDragging = true;
             return;
         }
 
@@ -454,6 +529,7 @@ public sealed partial class Player
         }
         UpdateHoveredButton(ev.motion.x, ev.motion.y);
         UpdateProgressBarHover(ev.motion.x, ev.motion.y);
+        _renderer.UpdateCursor(ev.motion.x, ev.motion.y);
         ShowUI();
     }
 
@@ -539,8 +615,7 @@ public sealed partial class Player
                 {
                     Playlist.Clear();
                     _renderer.PlaylistSelectedIndex = -1;
-                    _paused = true;
-                    _clock.Stop();
+                    SetPaused(true);
                     _decodeRunning = false;
                     _renderer.StopAudio();
                     lock (_videoLock) { Monitor.PulseAll(_videoLock); }
@@ -586,17 +661,14 @@ public sealed partial class Player
                 if (_stopped)
                 {
                     _stopped = false;
-                    _paused = false;
                     RequestSeek(0);
                     _clock.Reset();
-                    _clock.Start();
                     _clockStarted = false;
+                    SetPaused(false);
                 }
                 else
                 {
-                    _paused = !_paused;
-                    if (_paused) _clock.Stop();
-                    else _clock.Start();
+                    SetPaused(!_paused);
                 }
                 _forceRedraw = true;
                 break;
@@ -652,6 +724,22 @@ public sealed partial class Player
     }
 
     private int ProgressBarMargin => _renderer.PlaylistPanelVisible ? SDLRenderer.PlaylistPanelWidth + 20 : 20;
+
+    private void SetPaused(bool paused)
+    {
+        if (_paused == paused) return;
+        _paused = paused;
+        if (_paused)
+        {
+            _clock.Stop();
+            _renderer.PauseAudio();
+        }
+        else
+        {
+            _clock.Start();
+            _renderer.ResumeAudio();
+        }
+    }
 
     private bool IsOnProgressBar(int x, int y)
     {

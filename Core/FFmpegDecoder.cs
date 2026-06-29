@@ -5,6 +5,9 @@ namespace CSharpFFmpeg;
 
 public sealed unsafe class FFmpegDecoder : IDisposable
 {
+    [DllImport("libavutil", CallingConvention = CallingConvention.Cdecl)]
+    private static extern int av_strerror(int errnum, byte* errbuf, ulong errbuf_size);
+
     private AVFormatContext* _fmtCtx;
     private AVCodecContext* _vCodecCtx;
     private AVCodecContext* _aCodecCtx;
@@ -17,6 +20,30 @@ public sealed unsafe class FFmpegDecoder : IDisposable
     private bool _useHwAccel;
     private string _currentUrl = "";
     private double _lastSeekPos;
+
+    // Interrupt callback for timeout during open/find_stream_info
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int InterruptCallbackDelegate(void* opaque);
+
+    private static readonly InterruptCallbackDelegate _interruptDelegate = InterruptCallback;
+    private static long _interruptDeadline;
+
+    private const int OpenTimeoutMs = 15000;
+
+    private static int InterruptCallback(void* opaque)
+    {
+        return Environment.TickCount64 > _interruptDeadline ? 1 : 0;
+    }
+
+    public static string ErrorString(int errorCode)
+    {
+        var buf = new byte[256];
+        fixed (byte* p = buf)
+        {
+            av_strerror(errorCode, p, (ulong)buf.Length);
+        }
+        return System.Text.Encoding.UTF8.GetString(buf).TrimEnd('\0');
+    }
 
     public bool UseHwAccel { set => _useHwAccel = value; }
 
@@ -36,24 +63,35 @@ public sealed unsafe class FFmpegDecoder : IDisposable
         _currentUrl = url;
         int ret;
         AVDictionary* opts = null;
-        if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-            url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        bool isNetwork = url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
+                         url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+        if (isNetwork)
         {
             ffmpeg.av_dict_set(&opts, "user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 0);
             ffmpeg.av_dict_set(&opts, "reconnect", "1", 0);
             ffmpeg.av_dict_set(&opts, "reconnect_streamed", "1", 0);
             ffmpeg.av_dict_set(&opts, "reconnect_at_eof", "1", 0);
             ffmpeg.av_dict_set(&opts, "reconnect_delay_max", "5", 0);
-            ffmpeg.av_dict_set(&opts, "analyzeduration", "100000000", 0);
-            ffmpeg.av_dict_set(&opts, "probesize", "100000000", 0);
+            ffmpeg.av_dict_set(&opts, "analyzeduration", "10000000", 0);
+            ffmpeg.av_dict_set(&opts, "probesize", "10000000", 0);
             ffmpeg.av_dict_set(&opts, "fflags", "+discardcorrupt", 0);
-            ffmpeg.av_dict_set(&opts, "rw_timeout", "30000000", 0);
-            ffmpeg.av_dict_set(&opts, "timeout", "30000000", 0);
+            ffmpeg.av_dict_set(&opts, "rw_timeout", "15000000", 0);
+            ffmpeg.av_dict_set(&opts, "timeout", "15000000", 0);
             ffmpeg.av_dict_set(&opts, "buffer_size", "1048576", 0);
             // VLC-like: fresh connection per segment, no persistent HTTP/TLS
             ffmpeg.av_dict_set(&opts, "http_persistent", "0", 0);
             ffmpeg.av_dict_set(&opts, "http_multiple", "0", 0);
         }
+
+        // Pre-allocate format context and set interrupt callback for timeout
+        _fmtCtx = ffmpeg.avformat_alloc_context();
+        _interruptDeadline = Environment.TickCount64 + OpenTimeoutMs;
+        _fmtCtx->interrupt_callback = new AVIOInterruptCB
+        {
+            callback = new AVIOInterruptCB_callback_func { Pointer = Marshal.GetFunctionPointerForDelegate(_interruptDelegate) },
+            opaque = null
+        };
+
         fixed (AVFormatContext** pFmt = &_fmtCtx)
         {
             ret = ffmpeg.avformat_open_input(pFmt, url, null, &opts);
@@ -61,15 +99,18 @@ public sealed unsafe class FFmpegDecoder : IDisposable
             if (ret < 0)
             {
                 _fmtCtx = null;
-                throw new InvalidOperationException($"avformat_open_input failed: {ret}");
+                throw new InvalidOperationException($"avformat_open_input failed: {ret} ({ErrorString(ret)})");
             }
         }
         ret = ffmpeg.avformat_find_stream_info(_fmtCtx, null);
         if (ret < 0)
         {
             Dispose();
-            throw new InvalidOperationException($"avformat_find_stream_info failed: {ret}");
+            throw new InvalidOperationException($"avformat_find_stream_info failed: {ret} ({ErrorString(ret)})");
         }
+
+        // Clear interrupt callback after successful open
+        _fmtCtx->interrupt_callback = new AVIOInterruptCB { callback = default, opaque = null };
 
         // Increase internal packet buffer for smoother HLS segment transitions
         _fmtCtx->max_analyze_duration = 100_000_000;

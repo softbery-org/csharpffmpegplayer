@@ -16,6 +16,8 @@ class Program
 
         bool useGpu = args.Contains("-gpu") || args.Contains("--gpu");
         int targetFps = 0;
+        int apiPort = 0;
+        int apiPublicPort = 0;
         string? subtitlePath = null;
         string? playlistPath = null;
         string? urlListPath = null;
@@ -37,13 +39,23 @@ class Program
                 playlistPath = args[i + 1];
                 i++;
             }
+            else if ((args[i] == "--api-port") && i + 1 < args.Length)
+            {
+                int.TryParse(args[i + 1], out apiPort);
+                i++;
+            }
+            else if ((args[i] == "--api-public") && i + 1 < args.Length)
+            {
+                int.TryParse(args[i + 1], out apiPublicPort);
+                i++;
+            }
             else if ((args[i] == "--url-list" || args[i] == "-ul") && i + 1 < args.Length)
             {
                 urlListPath = args[i + 1];
                 i++;
             }
             else if (args[i] == "-gpu" || args[i] == "--gpu" || args[i] == "--help" || args[i] == "-h" ||
-                     args[i] == "--url-list" || args[i] == "-ul")
+                     args[i] == "--url-list" || args[i] == "-ul" || args[i] == "--api-port" || args[i] == "--api-public")
             {
                 continue;
             }
@@ -69,7 +81,7 @@ class Program
         // Detect lib path: a path that exists as directory and contains FFmpeg libs
         foreach (var arg in args)
         {
-            if (arg == "-gpu" || arg == "--gpu" || arg == "--fps" || arg == "-fps" || arg == "--subtitle" || arg == "-sub" || arg == "--playlist" || arg == "-pl" || arg == "--help" || arg == "-h")
+            if (arg == "-gpu" || arg == "--gpu" || arg == "--fps" || arg == "-fps" || arg == "--subtitle" || arg == "-sub" || arg == "--playlist" || arg == "-pl" || arg == "--help" || arg == "-h" || arg == "--api-port" || arg == "--api-public")
                 continue;
             if (int.TryParse(arg, out _))
                 continue;
@@ -241,6 +253,10 @@ class Program
                 player.RestoreWinW = restoredSession.WindowW;
                 player.RestoreWinH = restoredSession.WindowH;
             }
+            if (apiPort > 0)
+                player.StartHttpApi(apiPort, false);
+            if (apiPublicPort > 0)
+                player.StartHttpApi(apiPublicPort, true);
             player.Play(playlist.Current, playlist.CurrentEntry);
             return 0;
         }
@@ -364,6 +380,8 @@ class Program
             -pl PATH             Alias for --playlist
             --url-list PATH     Load URLs from text file (one URL per line, plugin-resolved)
             -ul PATH            Alias for --url-list
+            --api-port PORT     Enable HTTP API on localhost:PORT (local only)
+            --api-public PORT   Enable HTTP API on 0.0.0.0:PORT (NAT/remote access)
             --help, -h           Show this help message
 
             <file...>            One or more media files to play sequentially
@@ -386,12 +404,23 @@ class Program
             Left / Right         Seek -10s / +10s
             N                    Next track in playlist
             P                    Previous track in playlist
-            ESC                  Exit fullscreen (or quit if not fullscreen)
-            Q                    Quit
+            F                    Toggle fullscreen
+            ESC                  Exit fullscreen (or close About overlay / quit)
+            T                    Toggle always on top
+            Tab                  Toggle playlist panel
+            Up / Down            Select previous / next playlist item (when panel visible)
+            Enter                Play selected playlist item
+            Delete / Backspace   Remove selected playlist item
+            Q                    Save session and quit
 
         MOUSE CONTROLS:
             Click progress bar   Seek to position
+            Hover progress bar   Thumbnail preview
+            Drag progress bar    Scrub through video
             Double-click video   Toggle fullscreen
+            Click playlist item  Select (first click) / Play (second click)
+            Drag playlist item   Reorder playlist
+            Right-click playlist Context menu (remove, play)
             Hover buttons        Play/Pause, Stop, Open File
 
         SUPPORTED FORMATS:

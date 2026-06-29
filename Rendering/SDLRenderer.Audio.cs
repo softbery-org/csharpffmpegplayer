@@ -42,6 +42,16 @@ public sealed partial class SDLRenderer
         _audioInitialized = true;
     }
 
+    public void PauseAudio()
+    {
+        if (_audioInitialized) SDL.SDL_PauseAudio(1);
+    }
+
+    public void ResumeAudio()
+    {
+        if (_audioInitialized) SDL.SDL_PauseAudio(0);
+    }
+
     public void StopAudio()
     {
         if (_audioInitialized)

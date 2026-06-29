@@ -41,10 +41,15 @@ public sealed partial class Player : IDisposable
     private bool _windowDragging;
     private int _windowDragOffsetX;
     private int _windowDragOffsetY;
+    private bool _videoDragPending;
+    private int _videoDragStartX;
+    private int _videoDragStartY;
     private bool _windowResizing;
     private int _resizeEdge; // 0=none, 1=right, 2=bottom, 3=bottom-right
     private int _resizeStartWinX, _resizeStartWinY;
     private int _resizeStartW, _resizeStartH;
+    private long _lastResizeTicks;
+    private const long ResizeThrottleMs = 16;
     private int _plDragFromIndex = -1;
     private bool _plDragging;
     private bool _volDragging;
@@ -57,8 +62,16 @@ public sealed partial class Player : IDisposable
     private bool _uiHidden;
     private int _hoveredButton = -1;
     private string? _pendingOpenFile;
+    private PlaylistEntry? _pendingOpenEntry;
     private int _pendingPrevNext;
     private volatile bool _stopRequested;
+    private volatile bool _asyncOpenPending;
+    private volatile bool _asyncOpenComplete;
+    private volatile bool _asyncOpenSuccess;
+    private volatile Exception? _asyncOpenError;
+    private volatile string? _asyncOpenFilePath;
+    private volatile PlaylistEntry? _asyncOpenEntry;
+    private volatile int _asyncOpenAttempt;
     private bool _forceRedraw;
     private VideoFrame? _lastFrame;
     private bool _stopped;
@@ -98,72 +111,20 @@ public sealed partial class Player : IDisposable
 
     public void Play(string filePath, PlaylistEntry? entry = null)
     {
-        _videoPath = filePath;
-        try
-        {
-            _decoder.UseHwAccel = _useHwAccel;
-            _decoder.Open(filePath);
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"[Player] Initial open failed: {ex.Message}");
-            if (entry != null && !string.IsNullOrEmpty(entry.SourceUrl))
-            {
-                var plugin = PluginLoader.FindPluginForUrl(entry.SourceUrl);
-                if (plugin != null)
-                {
-                    Console.Error.WriteLine($"[Player] Re-extracting from SourceUrl: {entry.SourceUrl}");
-                    var newEntries = plugin.Resolve(entry.SourceUrl);
-                    if (newEntries.Count > 0)
-                    {
-                        entry.Url = newEntries[0].Url;
-                        if (!string.IsNullOrEmpty(newEntries[0].DisplayName))
-                            entry.DisplayName = newEntries[0].DisplayName;
-                        _videoPath = entry.Url;
-                        _decoder.Open(entry.Url);
-                        Console.Error.WriteLine($"[Player] Re-opened with fresh URL");
-                    }
-                    else throw;
-                }
-                else throw;
-            }
-            else throw;
-        }
-
-        _videoWidth = _decoder.VideoWidth;
-        _videoHeight = _decoder.VideoHeight;
-        _duration = _decoder.DurationSec;
-
-        if (_decoder.VideoStreamIndex >= 0)
-        {
-            _renderer.InitVideo(_videoWidth, _videoHeight);
-            _renderer.Duration = _duration;
-            _renderer.Title = Path.GetFileNameWithoutExtension(filePath);
-        }
-
-        TryLoadSubtitles(filePath);
-
-        if (_decoder.AudioStreamIndex >= 0)
-            _renderer.InitAudio(_decoder.SampleRate, 2, OnAudioCallback);
-
         _renderer.Volume = RestoreVolume;
         _renderer.PlaylistPanelVisible = RestorePlaylistVisible;
+
+        // Show window immediately with default or restored size; media loads in the event loop
+        int initW = RestoreWinW > 0 ? RestoreWinW : 1280;
+        int initH = RestoreWinH > 0 ? RestoreWinH : 720;
+        _renderer.InitVideo(initW, initH);
         if (RestoreWinW > 0)
             _renderer.SetWindowGeometry(RestoreWinX, RestoreWinY, RestoreWinW, RestoreWinH);
+        _renderer.RenderUI();
 
-        _decodeRunning = true;
-        _trackEof = false;
-        _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "Decode" };
-        _decodeThread.Start();
-        _trackOpenTicks = Environment.TickCount64;
-
-        if (StartPositionSec > 1.0)
-        {
-            Console.Error.WriteLine($"[Player] Restoring position {StartPositionSec:F1}s");
-            Thread.Sleep(300);
-            RequestSeek(StartPositionSec);
-            StartPositionSec = 0;
-        }
+        // Queue the first file to open from the event loop so UI is responsive
+        _pendingOpenFile = filePath;
+        _pendingOpenEntry = entry;
 
         EventLoop();
     }
@@ -171,6 +132,7 @@ public sealed partial class Player : IDisposable
     public void Dispose()
     {
         _running = false;
+        StopHttpApi();
         _decodeThread?.Join(2000);
         lock (_videoLock) Monitor.Pulse(_videoLock);
         _renderer.Dispose();

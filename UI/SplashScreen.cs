@@ -84,9 +84,14 @@ internal sealed class SplashScreen : IDisposable
             float t = (float)elapsed / DurationMs;
             t = Math.Clamp(t, 0f, 1f);
 
-            // Clear with full transparency — no background panel
+            // Clear with full transparency
             SDL.SDL_SetRenderDrawColor(_renderer, 0, 0, 0, 0);
             SDL.SDL_RenderClear(_renderer);
+
+            // Rounded panel background
+            float panelAlpha = EaseOutCubic(Math.Clamp(t * 3f, 0f, 1f));
+            DrawRoundedPanel(PanelPad, PanelPad, Width - 2 * PanelPad, Height - 2 * PanelPad,
+                PanelRadius, 18, 24, 38, (byte)(235 * panelAlpha));
 
             // Logo fade-in (first 35% of animation)
             float logoAlpha = EaseOutCubic(Math.Clamp(t * 2.8f, 0f, 1f));
@@ -148,6 +153,9 @@ internal sealed class SplashScreen : IDisposable
             SDL.SDL_SetRenderDrawColor(_renderer, 0, 0, 0, 0);
             SDL.SDL_RenderClear(_renderer);
 
+            DrawRoundedPanel(PanelPad, PanelPad, Width - 2 * PanelPad, Height - 2 * PanelPad,
+                PanelRadius, 18, 24, 38, (byte)(235 * a));
+
             DrawLogo(a, 1f);
             RenderText("CSharp FFmpeg Player", Width / 2, 250, a, _fontTitle);
             RenderText("video & audio player", Width / 2, 290, a * 0.7f, _fontSub);
@@ -188,53 +196,70 @@ internal sealed class SplashScreen : IDisposable
         }
     }
 
-    // ── Logo: film strip + play triangle + audio wave bars ───────────────────
+    // ── Logo: animated film strip + play triangle + audio wave bars ───────────
 
     private void DrawLogo(float alpha, float animT)
     {
-        int sx = LogoCx - StripW / 2;
-        int sy = LogoCy - StripH / 2;
+        float loopT = animT * 2.5f;
+
+        // Floating / breathing film strip
+        float bounce = 4f * MathF.Sin(loopT * MathF.PI);
+        float breath = 0.92f + 0.08f * MathF.Cos(loopT * MathF.PI);
+        int sx = LogoCx - (int)(StripW / 2 * breath);
+        int sy = LogoCy - (int)(StripH / 2 * breath) + (int)bounce;
+        int curStripW = (int)(StripW * breath);
+        int curStripH = (int)(StripH * breath);
 
         // Film strip body
-        var stripRect = new SDL.SDL_Rect { x = sx, y = sy, w = StripW, h = StripH };
+        var stripRect = new SDL.SDL_Rect { x = sx, y = sy, w = curStripW, h = curStripH };
         SDL.SDL_SetRenderDrawColor(_renderer, (byte)(45 * alpha), (byte)(50 * alpha), (byte)(60 * alpha), 240);
         SDL.SDL_RenderFillRect(_renderer, ref stripRect);
 
-        // Film strip border (subtle highlight)
-        SDL.SDL_SetRenderDrawColor(_renderer, (byte)(70 * alpha), (byte)(80 * alpha), (byte)(100 * alpha), 255);
+        // Animated border glow
+        float borderGlow = 0.7f + 0.3f * MathF.Sin(loopT * MathF.PI * 2f);
+        SDL.SDL_SetRenderDrawColor(_renderer,
+            (byte)((70 + 60 * borderGlow) * alpha),
+            (byte)((80 + 60 * borderGlow) * alpha),
+            (byte)((100 + 80 * borderGlow) * alpha), 255);
         SDL.SDL_RenderDrawRect(_renderer, ref stripRect);
 
-        // Sprocket holes (top & bottom rows)
-        int holeCount = (StripW - SprocketSpacing) / SprocketSpacing;
-        int holeStartX = sx + (StripW - holeCount * SprocketSpacing) / 2;
+        // Sprocket holes (top & bottom rows) with shimmer
+        int holeCount = (curStripW - SprocketSpacing) / SprocketSpacing;
+        int holeStartX = sx + (curStripW - holeCount * SprocketSpacing) / 2;
 
         for (int i = 0; i < holeCount; i++)
         {
+            float shimmer = 0.5f + 0.5f * MathF.Sin(loopT * MathF.PI * 3f + i * 0.4f);
+            byte holeR = (byte)((6 + 20 * shimmer) * alpha);
+            byte holeG = (byte)((10 + 25 * shimmer) * alpha);
+            byte holeB = (byte)((22 + 40 * shimmer) * alpha);
+            SDL.SDL_SetRenderDrawColor(_renderer, holeR, holeG, holeB, 255);
             int hx = holeStartX + i * SprocketSpacing;
             var topHole = new SDL.SDL_Rect { x = hx, y = sy + 5, w = SprocketSize, h = SprocketSize };
-            SDL.SDL_SetRenderDrawColor(_renderer, (byte)(6 * alpha), (byte)(10 * alpha), (byte)(22 * alpha), 255);
             SDL.SDL_RenderFillRect(_renderer, ref topHole);
-            var botHole = new SDL.SDL_Rect { x = hx, y = sy + StripH - 5 - SprocketSize, w = SprocketSize, h = SprocketSize };
+            var botHole = new SDL.SDL_Rect { x = hx, y = sy + curStripH - 5 - SprocketSize, w = SprocketSize, h = SprocketSize };
             SDL.SDL_RenderFillRect(_renderer, ref botHole);
         }
 
-        // Inner frame (viewport area between sprockets)
+        // Inner frame with animated light
         int innerY = sy + 16;
-        int innerH = StripH - 32;
-        var innerRect = new SDL.SDL_Rect { x = sx + 4, y = innerY, w = StripW - 8, h = innerH };
-        SDL.SDL_SetRenderDrawColor(_renderer, (byte)(20 * alpha), (byte)(28 * alpha), (byte)(44 * alpha), 255);
+        int innerH = curStripH - 32;
+        var innerRect = new SDL.SDL_Rect { x = sx + 4, y = innerY, w = curStripW - 8, h = innerH };
+        float frameLight = 0.85f + 0.15f * MathF.Sin(loopT * MathF.PI * 2f);
+        SDL.SDL_SetRenderDrawColor(_renderer, (byte)(20 * frameLight * alpha), (byte)(28 * frameLight * alpha), (byte)(44 * frameLight * alpha), 255);
         SDL.SDL_RenderFillRect(_renderer, ref innerRect);
 
-        // Play triangle (centered in inner frame)
+        // Play triangle with pulse and bounce
         float triAlpha = EaseOutCubic(Math.Clamp(animT * 3f, 0f, 1f));
         int triCx = LogoCx;
-        int triCy = innerY + innerH / 2;
-        int triSize = (int)(28 * EaseOutBack(Math.Clamp(animT * 2.5f, 0f, 1f)));
+        int triCy = innerY + innerH / 2 + (int)(3f * MathF.Sin(loopT * MathF.PI * 2f));
+        float triScale = 1f + 0.12f * MathF.Sin(loopT * MathF.PI * 2f);
+        int triSize = (int)(28 * triScale * EaseOutBack(Math.Clamp(animT * 2.5f, 0f, 1f)));
         DrawPlayTriangle(triCx, triCy, triSize, triAlpha * alpha);
 
-        // Audio wave bars (below film strip)
+        // Audio wave bars with dynamic animation
         float waveT = Math.Clamp((animT - 0.2f) / 0.6f, 0f, 1f);
-        int waveY = sy + StripH + 12;
+        int waveY = sy + curStripH + 12;
         int totalWaveW = WaveBars * WaveBarW + (WaveBars - 1) * WaveBarGap;
         int waveStartX = LogoCx - totalWaveW / 2;
 
@@ -243,7 +268,8 @@ internal sealed class SplashScreen : IDisposable
             float barDelay = i * 0.08f;
             float barAnim = Math.Clamp((waveT - barDelay) / (1f - barDelay), 0f, 1f);
             float barEase = EaseOutCubic(barAnim);
-            float pattern = WavePattern[i % WavePattern.Length];
+            float wave = MathF.Sin(loopT * MathF.PI * 2f + i * 0.6f);
+            float pattern = WavePattern[i % WavePattern.Length] * (0.7f + 0.3f * wave);
             int barH = (int)(WaveMaxH * pattern * barEase * alpha);
             if (barH < 1) barH = 1;
 

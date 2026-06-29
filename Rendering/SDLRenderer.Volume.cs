@@ -4,8 +4,6 @@ namespace CSharpFFmpeg;
 
 public sealed partial class SDLRenderer
 {
-    private const int VolBarMaxW = 240;
-    private const int VolBarH    = 36;
     private const float VolMax   = 1.5f;
 
     public void ShowVolumeHud() { }
@@ -13,8 +11,7 @@ public sealed partial class SDLRenderer
     public float HitTestVolumeBar(int mx, int my)
     {
         if (!ControlsVisible) return -1f;
-        int sliderY = _windowH - OverlayBottomMargin;
-        int sliderX = _windowW - 40 - VolSliderW;
+        (int sliderX, int sliderY) = GetVolumeBarPos();
         if (mx < sliderX || mx > sliderX + VolSliderW) return -1f;
         if (my < sliderY - 12 || my > sliderY + 12) return -1f;
         float frac = (mx - sliderX) / (float)VolSliderW;
@@ -24,19 +21,26 @@ public sealed partial class SDLRenderer
     public float SampleVolumeBarX(int mx)
     {
         if (!ControlsVisible) return -1f;
-        int sliderX = _windowW - 40 - VolSliderW;
+        (int sliderX, int sliderY) = GetVolumeBarPos();
         float frac = (mx - sliderX) / (float)VolSliderW;
         return Math.Clamp(frac * VolMax, 0f, VolMax);
+    }
+
+    private (int x, int y) GetVolumeBarPos()
+    {
+        int sliderX = (_windowW - VolSliderW) / 2;
+        int sliderY = _windowH / 2 + 72;
+        return (sliderX, sliderY);
     }
 
     private void DrawVolumeHud()
     {
         if (!ControlsVisible) return;
 
-        int sliderY = _windowH - OverlayBottomMargin;
-        int sliderX = _windowW - 40 - VolSliderW;
+        (int sliderX, int sliderY) = GetVolumeBarPos();
         float fillFrac = Math.Clamp(Volume / VolMax, 0f, 1f);
-        int fillW = (int)(VolSliderW * fillFrac);
+        int filledBars = (int)(VolBarCount * fillFrac);
+        if (fillFrac > 0 && filledBars == 0) filledBars = 1;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
@@ -70,27 +74,22 @@ public sealed partial class SDLRenderer
             }
         }
 
-        // Track background
-        SDL.SDL_SetRenderDrawColor(_renderer, 80, 80, 80, 180);
-        var trackRect = new SDL.SDL_Rect { x = sliderX, y = sliderY - VolSliderH / 2, w = VolSliderW, h = VolSliderH };
-        SDL.SDL_RenderFillRect(_renderer, ref trackRect);
-
-        // Fill
-        if (fillW > 0)
+        // Segmented volume bar (audio wave style)
+        int baseY = sliderY + VolSliderH / 2;
+        int startX = sliderX;
+        for (int i = 0; i < VolBarCount; i++)
         {
-            SDL.SDL_SetRenderDrawColor(_renderer, 220, 220, 220, 220);
-            var fillRect = new SDL.SDL_Rect { x = sliderX, y = sliderY - VolSliderH / 2, w = fillW, h = VolSliderH };
-            SDL.SDL_RenderFillRect(_renderer, ref fillRect);
-        }
-
-        // Knob
-        int knobR = 5;
-        int knobX = sliderX + fillW;
-        SDL.SDL_SetRenderDrawColor(_renderer, 240, 240, 240, 230);
-        for (int dy = -knobR; dy <= knobR; dy++)
-        {
-            int dx = (int)Math.Sqrt(knobR * knobR - dy * dy);
-            var r = new SDL.SDL_Rect { x = knobX - dx, y = sliderY + dy, w = dx * 2, h = 1 };
+            float t = (float)i / (VolBarCount - 1);
+            int barH = (int)(VolSliderH * (0.35f + 0.65f * t));
+            int bx = startX + i * (VolBarW + VolBarGap);
+            int by = baseY - barH;
+            bool filled = i < filledBars;
+            SDL.SDL_SetRenderDrawColor(_renderer,
+                filled ? (byte)220 : (byte)80,
+                filled ? (byte)220 : (byte)80,
+                filled ? (byte)220 : (byte)80,
+                filled ? (byte)220 : (byte)120);
+            var r = new SDL.SDL_Rect { x = bx, y = by, w = VolBarW, h = barH };
             SDL.SDL_RenderFillRect(_renderer, ref r);
         }
 

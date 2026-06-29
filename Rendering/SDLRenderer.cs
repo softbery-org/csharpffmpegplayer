@@ -12,18 +12,33 @@ public sealed partial class SDLRenderer : IDisposable
     private int _width;
     private int _height;
     private bool _audioInitialized;
+    private IntPtr _cursorDefault;
+    private IntPtr _cursorSizeWE;
+    private IntPtr _cursorSizeNS;
+    private IntPtr _cursorSizeNWSE;
+    private IntPtr _cursorHand;
     private SDL.SDL_AudioCallback? _audioCallbackDelegate;
     private Action<byte[]>? _userAudioCallback;
     private int _windowW;
     private int _windowH;
+    private int _windowedX;
+    private int _windowedY;
+    private int _windowedW;
+    private int _windowedH;
+    private bool _windowedGeometrySaved;
+    private bool _windowWasMaximized;
     private const int ProgressBarHeight = 60;
+    private const int ProgressBarBottomMargin = 28;
     private const int TextHeight = 18;
     private const int TrackHeight = 4;
     private const int BarBtnH = 22;
     private const int BarBtnW = 28;
     private const int OverlayBottomMargin = 28;
-    private const int VolSliderW = 100;
-    private const int VolSliderH = 4;
+    private const int VolBarCount = 28;
+    private const int VolBarW = 3;
+    private const int VolBarGap = 2;
+    private const int VolSliderW = VolBarCount * VolBarW + (VolBarCount - 1) * VolBarGap;
+    private const int VolSliderH = 18;
     private double _progress;
     private double _duration;
     private string _title = "";
@@ -74,6 +89,7 @@ public sealed partial class SDLRenderer : IDisposable
 
     // Title bar buttons
     private bool _minimizeHovered;
+    private bool _maximizeHovered;
     private bool _closeHovered;
 
     // Control buttons
@@ -112,6 +128,7 @@ public sealed partial class SDLRenderer : IDisposable
             width, height);
 
         InitFont();
+        InitCursors();
     }
 
     private void InitFont()
@@ -188,6 +205,8 @@ public sealed partial class SDLRenderer : IDisposable
         var dstRect = new SDL.SDL_Rect { x = dstX, y = dstY, w = dstW, h = dstH };
         SDL.SDL_RenderCopy(_renderer, _texture, IntPtr.Zero, ref dstRect);
 
+        DrawTitleBarButtons();
+
         if (ProgressBarVisible)
             DrawProgressBar();
         if (ProgressBarVisible && ProgressHoverTime >= 0)
@@ -224,9 +243,48 @@ public sealed partial class SDLRenderer : IDisposable
 
     public void SetFullscreen(bool fullscreen)
     {
-        SDL.SDL_SetWindowFullscreen(_window, fullscreen
-            ? (uint)SDL.SDL_WindowFlags.SDL_WINDOW_FULLSCREEN_DESKTOP
-            : 0);
+        if (fullscreen)
+        {
+            // Save windowed geometry before entering fullscreen
+            var flags = (SDL.SDL_WindowFlags)SDL.SDL_GetWindowFlags(_window);
+            _windowWasMaximized = flags.HasFlag(SDL.SDL_WindowFlags.SDL_WINDOW_MAXIMIZED);
+            if (!_windowWasMaximized)
+            {
+                SDL.SDL_GetWindowPosition(_window, out _windowedX, out _windowedY);
+                SDL.SDL_GetWindowSize(_window, out _windowedW, out _windowedH);
+                _windowedGeometrySaved = true;
+            }
+            else
+            {
+                _windowedGeometrySaved = false;
+            }
+            SDL.SDL_SetWindowFullscreen(_window, (uint)SDL.SDL_WindowFlags.SDL_WINDOW_FULLSCREEN_DESKTOP);
+        }
+        else
+        {
+            SDL.SDL_SetWindowFullscreen(_window, 0);
+            if (_windowedGeometrySaved)
+            {
+                SDL.SDL_SetWindowSize(_window, _windowedW, _windowedH);
+                SDL.SDL_SetWindowPosition(_window, _windowedX, _windowedY);
+            }
+            else if (_windowWasMaximized)
+            {
+                SDL.SDL_MaximizeWindow(_window);
+            }
+        }
+    }
+
+    [DllImport("SDL2", CallingConvention = CallingConvention.Cdecl)]
+    private static extern void SDL_SetWindowAlwaysOnTop(IntPtr window, SDL.SDL_bool on_top);
+
+    public bool AlwaysOnTop { get; private set; }
+
+    public void SetAlwaysOnTop(bool onTop)
+    {
+        AlwaysOnTop = onTop;
+        if (_window != IntPtr.Zero)
+            SDL_SetWindowAlwaysOnTop(_window, onTop ? SDL.SDL_bool.SDL_TRUE : SDL.SDL_bool.SDL_FALSE);
     }
 
     public int GetWindowWidth() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowW; }
@@ -247,6 +305,29 @@ public sealed partial class SDLRenderer : IDisposable
         return ResizeEdge.None;
     }
 
+    private void InitCursors()
+    {
+        _cursorDefault = SDL.SDL_CreateSystemCursor(SDL.SDL_SystemCursor.SDL_SYSTEM_CURSOR_ARROW);
+        _cursorSizeWE = SDL.SDL_CreateSystemCursor(SDL.SDL_SystemCursor.SDL_SYSTEM_CURSOR_SIZEWE);
+        _cursorSizeNS = SDL.SDL_CreateSystemCursor(SDL.SDL_SystemCursor.SDL_SYSTEM_CURSOR_SIZENS);
+        _cursorSizeNWSE = SDL.SDL_CreateSystemCursor(SDL.SDL_SystemCursor.SDL_SYSTEM_CURSOR_SIZENWSE);
+        _cursorHand = SDL.SDL_CreateSystemCursor(SDL.SDL_SystemCursor.SDL_SYSTEM_CURSOR_HAND);
+    }
+
+    public void UpdateCursor(int x, int y)
+    {
+        IntPtr target = _cursorDefault;
+
+        var edge = HitTestResize(x, y);
+        if (edge == ResizeEdge.Right) target = _cursorSizeWE;
+        else if (edge == ResizeEdge.Bottom) target = _cursorSizeNS;
+        else if (edge == ResizeEdge.BottomRight) target = _cursorSizeNWSE;
+        else if (HitTestTitleBar(x, y) != TitleBarButton.None) target = _cursorHand;
+
+        if (target != IntPtr.Zero)
+            SDL.SDL_SetCursor(target);
+    }
+
     private void UpdateFps()
     {
         _fpsFrameCount++;
@@ -262,6 +343,8 @@ public sealed partial class SDLRenderer : IDisposable
     private void DrawFps()
     {
         if (_font == IntPtr.Zero) return;
+
+        const int fpsTextY = 6;
         string fpsText = $"{_displayedFps} FPS";
         var color = new SDL.SDL_Color { r = 180, g = 220, b = 180, a = 200 };
         IntPtr surface = SDLTtf.TTF_RenderUTF8_Blended(_font, fpsText, color);
@@ -270,7 +353,9 @@ public sealed partial class SDLRenderer : IDisposable
         SDL.SDL_FreeSurface(surface);
         if (tex == IntPtr.Zero) return;
         SDL.SDL_QueryTexture(tex, out _, out _, out int w, out int h);
-        var dst = new SDL.SDL_Rect { x = _windowW - w - 12, y = 8, w = w, h = h };
+        // Keep FPS text away from title bar logo/buttons
+        int x = ControlsVisible ? 40 : 10;
+        var dst = new SDL.SDL_Rect { x = x, y = fpsTextY, w = w, h = h };
         SDL.SDL_RenderCopy(_renderer, tex, IntPtr.Zero, ref dst);
         SDL.SDL_DestroyTexture(tex);
     }
@@ -309,7 +394,6 @@ public sealed partial class SDLRenderer : IDisposable
         _title = title;
         _progress = 0;
         _subtitleText = null;
-        _playlistScrollOffset = 0;
     }
 
     private static void Log(string msg) =>
@@ -325,6 +409,11 @@ public sealed partial class SDLRenderer : IDisposable
         if (_texture != IntPtr.Zero) { SDL.SDL_DestroyTexture(_texture); _texture = IntPtr.Zero; }
         if (_renderer != IntPtr.Zero) { SDL.SDL_DestroyRenderer(_renderer); _renderer = IntPtr.Zero; }
         if (_window != IntPtr.Zero) { SDL.SDL_DestroyWindow(_window); _window = IntPtr.Zero; }
+        if (_cursorDefault != IntPtr.Zero) { SDL.SDL_FreeCursor(_cursorDefault); _cursorDefault = IntPtr.Zero; }
+        if (_cursorSizeWE != IntPtr.Zero) { SDL.SDL_FreeCursor(_cursorSizeWE); _cursorSizeWE = IntPtr.Zero; }
+        if (_cursorSizeNS != IntPtr.Zero) { SDL.SDL_FreeCursor(_cursorSizeNS); _cursorSizeNS = IntPtr.Zero; }
+        if (_cursorSizeNWSE != IntPtr.Zero) { SDL.SDL_FreeCursor(_cursorSizeNWSE); _cursorSizeNWSE = IntPtr.Zero; }
+        if (_cursorHand != IntPtr.Zero) { SDL.SDL_FreeCursor(_cursorHand); _cursorHand = IntPtr.Zero; }
         SDL.SDL_Quit();
         Log("Disposed");
     }

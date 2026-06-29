@@ -4,16 +4,36 @@ namespace CSharpFFmpeg;
 
 public sealed partial class Player
 {
-    private void OpenNewFile(string filePath, PlaylistEntry? entry = null)
+    private bool OpenNewFile(string filePath, PlaylistEntry? entry = null, int attempt = 0)
     {
         if (string.IsNullOrWhiteSpace(filePath))
         {
             Console.Error.WriteLine("[Player] OpenNewFile: empty filePath, skipping");
-            return;
+            return false;
         }
-        _lastReopenTicks = Environment.TickCount64;
-        Console.Error.WriteLine($"[Player] OpenNewFile: {filePath}");
+        if (_asyncOpenPending)
+        {
+            Console.Error.WriteLine("[Player] OpenNewFile: another open already in progress, ignoring");
+            return false;
+        }
 
+        _lastReopenTicks = Environment.TickCount64;
+        _asyncOpenFilePath = filePath;
+        _asyncOpenEntry = entry;
+        _asyncOpenAttempt = attempt;
+        _asyncOpenPending = true;
+        _asyncOpenComplete = false;
+        _asyncOpenSuccess = false;
+        _asyncOpenError = null;
+
+        CleanupBeforeOpen();
+        Console.Error.WriteLine($"[Player] OpenNewFile async: {filePath}");
+        ThreadPool.QueueUserWorkItem(_ => OpenDecoderBackground());
+        return true;
+    }
+
+    private void CleanupBeforeOpen()
+    {
         _decodeRunning = false;
         _renderer.StopAudio();
         lock (_videoLock) { Monitor.PulseAll(_videoLock); }
@@ -29,22 +49,27 @@ public sealed partial class Player
         _lastFrame = null;
 
         _decoder.Dispose();
-        Console.Error.WriteLine($"[Player] Decoder disposed, opening: {filePath}");
+        Console.Error.WriteLine("[Player] Decoder disposed");
 
         _running = true;
-        _decodeRunning = true;
         _trackEof = false;
         _paused = false;
         _clockStarted = false;
         _stopped = false;
         _trackEnded = false;
         _clock.Reset();
+    }
 
+    private void OpenDecoderBackground()
+    {
+        string filePath = _asyncOpenFilePath!;
+        PlaylistEntry? entry = _asyncOpenEntry;
         try
         {
             _decoder.UseHwAccel = _useHwAccel;
             _decoder.Open(filePath);
             Console.Error.WriteLine($"[Player] Opened: video={_decoder.VideoStreamIndex} audio={_decoder.AudioStreamIndex} dur={_decoder.DurationSec:F1}s");
+            _asyncOpenSuccess = true;
         }
         catch (Exception ex)
         {
@@ -68,7 +93,9 @@ public sealed partial class Player
                                 entry.DisplayName = fresh.DisplayName;
                             _decoder.Open(fresh.Url);
                             Console.Error.WriteLine($"[Player] Re-opened: video={_decoder.VideoStreamIndex} audio={_decoder.AudioStreamIndex} dur={_decoder.DurationSec:F1}s");
-                            goto opened;
+                            _asyncOpenSuccess = true;
+                            _asyncOpenFilePath = fresh.Url;
+                            return;
                         }
                     }
                     catch (Exception ex2)
@@ -77,15 +104,28 @@ public sealed partial class Player
                     }
                 }
             }
-
-            _trackEnded = true;
-            _decodeRunning = false;
-            _renderer.ShowError($"Błąd odtwarzania:\n{Path.GetFileName(filePath)}\n{ex.Message}");
-            return;
+            _asyncOpenError = ex;
         }
+        finally
+        {
+            _asyncOpenComplete = true;
+            _asyncOpenPending = false;
+        }
+    }
 
-        opened:
+    public void ProcessAsyncOpenCompletion()
+    {
+        if (!_asyncOpenComplete) return;
+        _asyncOpenComplete = false;
 
+        if (_asyncOpenSuccess)
+            FinishOpen(_asyncOpenFilePath!, _asyncOpenEntry);
+        else
+            HandleOpenFailure(_asyncOpenFilePath!, _asyncOpenEntry, _asyncOpenAttempt, _asyncOpenError);
+    }
+
+    private void FinishOpen(string filePath, PlaylistEntry? entry)
+    {
         _videoWidth  = _decoder.VideoWidth;
         _videoHeight = _decoder.VideoHeight;
         _duration    = _decoder.DurationSec;
@@ -122,10 +162,37 @@ public sealed partial class Player
             _renderer.InitAudio(_decoder.SampleRate, 2, OnAudioCallback);
         }
 
+        _decodeRunning = true;
         _decodeThread = new Thread(DecodeLoop) { IsBackground = true, Name = "Decode" };
         _decodeThread.Start();
         _trackOpenTicks = Environment.TickCount64;
         Console.Error.WriteLine($"[Player] DecodeThread started");
+
+        if (StartPositionSec > 1.0)
+        {
+            Console.Error.WriteLine($"[Player] Restoring position {StartPositionSec:F1}s");
+            Thread.Sleep(300);
+            RequestSeek(StartPositionSec);
+            StartPositionSec = 0;
+        }
+    }
+
+    private void HandleOpenFailure(string filePath, PlaylistEntry? entry, int attempt, Exception? error)
+    {
+        if (attempt < Playlist?.Count && Playlist != null && Playlist.Count > 1)
+        {
+            bool advanced = Playlist.AdvanceToNext();
+            if (advanced)
+            {
+                Console.Error.WriteLine($"[Player] Open failed, trying next playlist item: {Playlist.Current}");
+                OpenNewFile(Playlist.Current, Playlist.CurrentEntry, attempt + 1);
+                return;
+            }
+        }
+
+        _trackEnded = true;
+        _decodeRunning = false;
+        _renderer.ShowError($"Błąd odtwarzania:\n{Path.GetFileName(filePath)}\n{error?.Message}");
     }
 
     private void TryLoadSubtitles(string videoPath)
@@ -253,14 +320,15 @@ public sealed partial class Player
             _renderer.SetPlaylistData(Array.Empty<string>(), Array.Empty<double>(), -1, 0);
             return;
         }
-        var entries = Playlist.Entries;
-        var names = new string[entries.Count];
-        var durations = new double[entries.Count];
-        for (int i = 0; i < entries.Count; i++)
+        int currentIndex = Playlist.CurrentIndex;
+        var entries = Playlist.Entries.ToArray();
+        var names = new string[entries.Length];
+        var durations = new double[entries.Length];
+        for (int i = 0; i < entries.Length; i++)
         {
             names[i] = entries[i].DisplayName;
-            durations[i] = i == Playlist.CurrentIndex ? _duration : 0;
+            durations[i] = i == currentIndex ? _duration : 0;
         }
-        _renderer.SetPlaylistData(names, durations, Playlist.CurrentIndex, GetMasterClock());
+        _renderer.SetPlaylistData(names, durations, currentIndex, GetMasterClock());
     }
 }

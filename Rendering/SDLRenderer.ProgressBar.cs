@@ -47,16 +47,16 @@ public sealed partial class SDLRenderer
         _thumbTime = -1;
     }
 
-    public int GetProgressBarY() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowH - ProgressBarHeight; }
+    public int GetProgressBarY() { SDL.SDL_GetWindowSize(_window, out _windowW, out _windowH); return _windowH - ProgressBarHeight - ProgressBarBottomMargin; }
 
     private void DrawProgressBar()
     {
-        int barY = _windowH - ProgressBarHeight;
+        int barY = _windowH - ProgressBarHeight - ProgressBarBottomMargin;
         int margin = 20;
         int barX = PlaylistPanelVisible ? PlaylistPanelWidth + margin : margin;
         int barW = _windowW - barX - margin;
         int trackH = TrackHeight;
-        int trackY = _windowH - trackH - 4;
+        int trackY = _windowH - trackH - 4 - ProgressBarBottomMargin;
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
         for (int i = 0; i < ProgressBarHeight; i++)
@@ -145,7 +145,7 @@ public sealed partial class SDLRenderer
         int margin = 20;
         int barW   = _windowW - margin * 2;
         int barX   = margin;
-        int trackY = _windowH - TrackHeight - 4;
+        int trackY = _windowH - TrackHeight - 4 - ProgressBarBottomMargin;
 
         if (_duration <= 0) return;
         double frac = Math.Clamp(ProgressHoverTime / _duration, 0, 1);

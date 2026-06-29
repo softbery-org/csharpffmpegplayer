@@ -177,13 +177,14 @@ dotnet run -c Release
 |---|---|
 | **Space** | Play / Pause |
 | **Left / Right** | Seek -10s / +10s |
-| **Up / Down** | Volume up / down |
 | **N** | Next track in playlist |
 | **P** | Previous track in playlist |
 | **F** | Toggle fullscreen |
 | **ESC** | Exit fullscreen (or close About overlay) |
-| **Q** | Quit |
+| **T** | Toggle always on top |
+| **Q** | Save session and quit |
 | **TAB** | Toggle playlist panel |
+| **Up / Down** | Select previous / next playlist item (when panel visible) |
 | **Del** | Remove selected item from playlist |
 | **Enter** | Play selected playlist item |
 
