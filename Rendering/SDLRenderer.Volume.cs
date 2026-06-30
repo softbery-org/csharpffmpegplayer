@@ -44,60 +44,85 @@ public sealed partial class SDLRenderer
 
         SDL.SDL_SetRenderDrawBlendMode(_renderer, SDL.SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
-        // Speaker icon
-        SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, 200);
-        int iconX = sliderX - 24;
+        // --- IKONA GŁOŚNIKA ---
+        int iconX = sliderX - 92;
         int iconCY = sliderY;
-        var spkBody = new SDL.SDL_Rect { x = iconX, y = iconCY - 3, w = 4, h = 6 };
-        SDL.SDL_RenderFillRect(_renderer, ref spkBody);
-        for (int dy = -6; dy <= 6; dy++)
+        
+        // Kolor ikony: czyste białe (jak na grafice)
+        SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, 255);
+
+        // 1. Body (prostokąt po lewej)
+        int bodyW = 12;
+        int bodyH = 18;
+        var body = new SDL.SDL_Rect { x = iconX, y = iconCY - bodyH / 2, w = bodyW, h = bodyH };
+        SDL.SDL_RenderFillRect(_renderer, ref body);
+
+        // 2. Cone (trapez łączący body z falami)
+        int coneStart = iconX + bodyW;
+        int coneL = 24;
+        int coneH = 32;
+        int coneEnd = coneStart + coneL;
+        for (int dy = -coneH / 2; dy <= coneH / 2; dy++)
         {
-            int halfW = 3 + (int)(3.0 * (1.0 - (double)Math.Abs(dy) / 6));
-            var r = new SDL.SDL_Rect { x = iconX + 4, y = iconCY + dy, w = halfW, h = 1 };
-            SDL.SDL_RenderFillRect(_renderer, ref r);
+            int absDy = Math.Abs(dy);
+            // Wyliczanie nachylenia trapezoidu
+            int leftOffset = absDy <= bodyH / 2
+                ? 0
+                : (int)(coneL * (absDy - bodyH / 2) / (float)(coneH / 2 - bodyH / 2));
+            
+            int x = coneStart + leftOffset;
+            int w = coneEnd - x;
+            if (w < 1) w = 1;
+            var line = new SDL.SDL_Rect { x = x, y = iconCY + dy, w = w, h = 1 };
+            SDL.SDL_RenderFillRect(_renderer, ref line);
         }
+
+        // 3. Sound waves (ŁUKI, nie koła)
         bool muted = Volume <= 0.001f;
-        byte waveAlpha = muted ? (byte)80 : (byte)180;
-        SDL.SDL_SetRenderDrawColor(_renderer, 200, 200, 200, waveAlpha);
-        for (int dy = -4; dy <= 4; dy++)
+        int waveX = coneEnd + 6; // Nieco bliżej stożka jak na grafice
+        int[] waveRadii = { 10, 18, 26 };
+        
+        for (int i = 0; i < waveRadii.Length; i++)
         {
-            int dx = (int)Math.Sqrt(16 - dy * dy);
-            SDL.SDL_RenderDrawPoint(_renderer, iconX + 11 + dx, iconCY + dy);
-        }
-        if (!muted)
-        {
-            for (int dy = -7; dy <= 7; dy++)
+            // Stopniowe wygaszanie przezroczystości fal
+            byte alpha = muted ? (byte)60 : (byte)(255 - (i * 60));
+            SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, alpha);
+            
+            int r = waveRadii[i];
+            // Rysujemy łuk używając sin/cos (od -PI/2 do PI/2 to prawa strona)
+            for (double angle = -Math.PI / 2 + 0.1; angle < Math.PI / 2 - 0.1; angle += 0.05)
             {
-                int dx = (int)Math.Sqrt(49 - dy * dy);
-                if (dx > 4)
-                    SDL.SDL_RenderDrawPoint(_renderer, iconX + 11 + dx, iconCY + dy);
+                int dx = (int)(Math.Cos(angle) * r);
+                int dy = (int)(Math.Sin(angle) * r);
+                SDL.SDL_RenderDrawPoint(_renderer, waveX + dx, iconCY + dy);
             }
         }
 
-        // Segmented volume bar (audio wave style)
+        // --- SEGMENTOWANY PASEK GŁOŚNOŚCI ---
         int baseY = sliderY + VolSliderH / 2;
-        int startX = sliderX;
         for (int i = 0; i < VolBarCount; i++)
         {
             float t = (float)i / (VolBarCount - 1);
+            // Wysokość rośnie od lewej do prawej (zgodnie z Twoją logiką i obrazkiem)
             int barH = (int)(VolSliderH * (0.35f + 0.65f * t));
-            int bx = startX + i * (VolBarW + VolBarGap);
+            int bx = sliderX + i * (VolBarW + VolBarGap);
             int by = baseY - barH;
             bool filled = i < filledBars;
-            SDL.SDL_SetRenderDrawColor(_renderer,
-                filled ? (byte)220 : (byte)80,
-                filled ? (byte)220 : (byte)80,
-                filled ? (byte)220 : (byte)80,
-                filled ? (byte)220 : (byte)120);
-            var r = new SDL.SDL_Rect { x = bx, y = by, w = VolBarW, h = barH };
-            SDL.SDL_RenderFillRect(_renderer, ref r);
+
+            if (filled)
+                SDL.SDL_SetRenderDrawColor(_renderer, 255, 255, 255, 255); // Białe wypełnienie
+            else
+                SDL.SDL_SetRenderDrawColor(_renderer, 60, 60, 60, 180);    // Ciemnoszary nieaktywny
+
+            var bar = new SDL.SDL_Rect { x = bx, y = by, w = VolBarW, h = barH };
+            SDL.SDL_RenderFillRect(_renderer, ref bar);
         }
 
-        // Volume percentage label
+        // --- PROCENTY ---
         if (_font != IntPtr.Zero)
         {
             string label = $"{(int)(Volume * 100)}%";
-            var col = new SDL.SDL_Color { r = 220, g = 220, b = 220, a = 180 };
+            var col = new SDL.SDL_Color { r = 255, g = 255, b = 255, a = 220 };
             IntPtr surf = SDLTtf.TTF_RenderUTF8_Blended(_font, label, col);
             if (surf != IntPtr.Zero)
             {
@@ -106,7 +131,7 @@ public sealed partial class SDLRenderer
                 if (tex != IntPtr.Zero)
                 {
                     SDL.SDL_QueryTexture(tex, out _, out _, out int tw, out int th);
-                    var dst = new SDL.SDL_Rect { x = sliderX + VolSliderW + 6, y = sliderY - th / 2, w = tw, h = th };
+                    var dst = new SDL.SDL_Rect { x = sliderX + VolSliderW + 12, y = sliderY - th / 2, w = tw, h = th };
                     SDL.SDL_RenderCopy(_renderer, tex, IntPtr.Zero, ref dst);
                     SDL.SDL_DestroyTexture(tex);
                 }

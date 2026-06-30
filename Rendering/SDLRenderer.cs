@@ -34,11 +34,11 @@ public sealed partial class SDLRenderer : IDisposable
     private const int BarBtnH = 22;
     private const int BarBtnW = 28;
     private const int OverlayBottomMargin = 28;
-    private const int VolBarCount = 28;
-    private const int VolBarW = 3;
+    private const int VolBarCount = 20;
+    private const int VolBarW = 4;
     private const int VolBarGap = 2;
     private const int VolSliderW = VolBarCount * VolBarW + (VolBarCount - 1) * VolBarGap;
-    private const int VolSliderH = 18;
+    private const int VolSliderH = 22;
     private double _progress;
     private double _duration;
     private string _title = "";

@@ -46,6 +46,7 @@ public sealed partial class SDLRenderer
 
         // Section: Playback
         RenderText("Odtwarzanie", col1X, y, blue);
+        int headerY = y;
         y += lineH + 4;
         RenderText("Space", col1X, y, white);        RenderText("Play / Pause", col1X + 110, y, gray);     y += lineH;
         RenderText("← / →", col1X, y, white);        RenderText("Seek -10s / +10s", col1X + 110, y, gray); y += lineH;
@@ -54,7 +55,7 @@ public sealed partial class SDLRenderer
         RenderText("ESC", col1X, y, white);          RenderText("Exit fullscreen / close / quit", col1X + 110, y, gray); y += lineH;
 
         // Section: Playlist / Window
-        int plY = y;
+        int plY = headerY;
         RenderText("Playlista / Okno", col2X, plY, blue);
         plY += lineH + 4;
         RenderText("Tab", col2X, plY, white);        RenderText("Toggle playlist panel", col2X + 110, plY, gray);     plY += lineH;

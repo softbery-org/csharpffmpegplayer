@@ -13,6 +13,8 @@ public sealed partial class Player
         }
         if (_asyncOpenPending)
         {
+            if (filePath == _asyncOpenFilePath)
+                return false; // same file already opening, ignore silently
             Console.Error.WriteLine("[Player] OpenNewFile: another open already in progress, ignoring");
             return false;
         }

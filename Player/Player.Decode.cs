@@ -36,7 +36,15 @@ public sealed partial class Player
                 break;
             }
 
-            _decoder.SendPacket();
+            int sendRet = _decoder.SendPacket();
+            if (sendRet < 0)
+            {
+                Console.Error.WriteLine($"[Decoder] SendPacket error: {sendRet} ({FFmpegDecoder.ErrorString(sendRet)})");
+                // Flush decoder to recover from corrupt packet
+                _decoder.FlushDecoders();
+                _decoder.UnrefPacket();
+                continue;
+            }
             _decoder.UnrefPacket();
 
             if (streamIdx == _decoder.VideoStreamIndex)
