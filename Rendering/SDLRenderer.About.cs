@@ -41,7 +41,7 @@ public sealed partial class SDLRenderer
 
         RenderText("CSharp FFmpeg Player", panX + 40, y, blue);
         y += lineH + 4;
-        RenderText("Wersja 1.0.0  |  FFmpeg + SDL2 (.NET 8)  |  Softbery by Paweł Tobis", panX + 40, y, muted);
+        RenderText("Wersja 3.30.6.bbe6612  |  FFmpeg + SDL2 (.NET 8)  |  Softbery by Paweł Tobis", panX + 40, y, muted);
         y += lineH + 8;
 
         // Section: Playback
