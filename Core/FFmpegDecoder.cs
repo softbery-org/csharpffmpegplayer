@@ -70,18 +70,6 @@ public sealed unsafe class FFmpegDecoder : IDisposable
         AVDictionary* opts = null;
         bool isNetwork = url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
                          url.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
-        // Always discard corrupt packets for both network and local files
-        ffmpeg.av_dict_set(&opts, "fflags", "+discardcorrupt+genpts+igndts+fastseek", 0);
-        // Try to recover from incomplete files
-        ffmpeg.av_dict_set(&opts, "err_detect", "ignore_err", 0);
-        // Handle truncated/incomplete files
-        ffmpeg.av_dict_set(&opts, "max_delay", "0", 0);
-        // Force full analysis for local files to get accurate duration
-        if (!isNetwork)
-        {
-            ffmpeg.av_dict_set(&opts, "analyzeduration", "100000000", 0);
-            ffmpeg.av_dict_set(&opts, "probesize", "100000000", 0);
-        }
         if (isNetwork)
         {
             ffmpeg.av_dict_set(&opts, "user_agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", 0);
@@ -126,8 +114,11 @@ public sealed unsafe class FFmpegDecoder : IDisposable
             throw new InvalidOperationException($"avformat_find_stream_info failed: {ret} ({ErrorString(ret)})");
         }
 
-        // Clear interrupt callback after successful open
-        _fmtCtx->interrupt_callback = new AVIOInterruptCB { callback = default, opaque = null };
+        // Disable interrupt callback after successful open.
+        // FFmpeg copies the callback into the AVIOContext during avformat_open_input,
+        // so clearing the format context field alone is not enough.
+        // Setting the deadline to far future ensures the callback never triggers.
+        _interruptDeadline = long.MaxValue;
 
         // Increase internal packet buffer for smoother HLS segment transitions
         _fmtCtx->max_analyze_duration = 100_000_000;
@@ -227,15 +218,10 @@ public sealed unsafe class FFmpegDecoder : IDisposable
     /// <summary>
     /// Read next packet. Returns false on EOF.
     /// Retries on transient network errors (EAGAIN, EINTR).
-    /// For local files, continues past partial file corruption.
     /// </summary>
     public bool ReadPacket(out int streamIndex)
     {
-        bool isNetwork = _currentUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
-                         _currentUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
-        int consecutiveErrors = 0;
-
-        for (int attempt = 0; attempt < 20; attempt++)
+        for (int attempt = 0; attempt < 5; attempt++)
         {
             int ret = ffmpeg.av_read_frame(_fmtCtx, _packet);
             if (ret >= 0)
@@ -247,29 +233,19 @@ public sealed unsafe class FFmpegDecoder : IDisposable
             if (ret == ffmpeg.AVERROR_EOF || ret == ffmpeg.AVERROR_EXIT)
                 break;
             // Network error — try reconnect after a few retries
-            consecutiveErrors++;
-            Console.Error.WriteLine($"[Decoder] ReadPacket error ret={ret} ({ErrorString(ret)}), attempt {attempt + 1}/20, consecutive errors: {consecutiveErrors}");
-            if (isNetwork && attempt >= 2)
+            Console.Error.WriteLine($"[Decoder] ReadPacket error ret={ret}, attempt {attempt + 1}/5");
+            if (attempt >= 2)
             {
                 Console.Error.WriteLine($"[Decoder] Attempting reconnect...");
                 Thread.Sleep(1000 * (attempt - 1));
                 if (Reconnect())
                 {
                     Console.Error.WriteLine($"[Decoder] Reconnect succeeded, retrying read");
-                    consecutiveErrors = 0;
                     continue;
                 }
                 Console.Error.WriteLine($"[Decoder] Reconnect failed");
             }
-            // For local files with many consecutive errors, file is likely incomplete
-            if (!isNetwork && consecutiveErrors >= 10)
-            {
-                Console.Error.WriteLine($"[Decoder] Too many consecutive read errors - file may be incomplete or corrupted");
-                Console.Error.WriteLine($"[Decoder] File duration: {DurationSec}s, but data ends earlier");
-                break;
-            }
-            // For local files, just retry with delay to skip past corruption
-            Thread.Sleep(50 * (attempt + 1));
+            Thread.Sleep(500 * (attempt + 1));
         }
         streamIndex = -1;
         return false;
@@ -501,7 +477,7 @@ public sealed unsafe class FFmpegDecoder : IDisposable
         return true;
     }
 
-    public void FlushDecoders()
+    private void FlushDecoders()
     {
         if (_vCodecCtx != null) ffmpeg.avcodec_flush_buffers(_vCodecCtx);
         if (_aCodecCtx != null) ffmpeg.avcodec_flush_buffers(_aCodecCtx);

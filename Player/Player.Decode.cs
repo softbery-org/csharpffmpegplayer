@@ -15,7 +15,8 @@ public sealed partial class Player
             {
                 _seekRequested = false;
                 ClearQueues();
-                _decoder.Seek(_seekTarget);
+                bool seekOk = _decoder.Seek(_seekTarget);
+                Console.Error.WriteLine($"[Decoder] Seek to {_seekTarget:F1}s: ok={seekOk}");
                 _clockStarted = false;
                 continue;
             }
@@ -31,6 +32,7 @@ public sealed partial class Player
 
             if (!_decoder.ReadPacket(out int streamIdx))
             {
+                Console.Error.WriteLine($"[Decoder] ReadPacket returned false (EOF/error), trackEof set. clockStarted={_clockStarted}");
                 _trackEof = true;
                 _decodeRunning = false;
                 break;
@@ -40,8 +42,6 @@ public sealed partial class Player
             if (sendRet < 0)
             {
                 Console.Error.WriteLine($"[Decoder] SendPacket error: {sendRet} ({FFmpegDecoder.ErrorString(sendRet)})");
-                // Flush decoder to recover from corrupt packet
-                _decoder.FlushDecoders();
                 _decoder.UnrefPacket();
                 continue;
             }

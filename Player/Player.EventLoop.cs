@@ -98,6 +98,10 @@ public sealed partial class Player
             bool clockEnd   = _clockStarted && _duration > 1.0 && GetMasterClock() >= _duration - 0.15;
             if (!_trackEnded && (clockEnd || eofDrained))
             {
+                Console.Error.WriteLine($"[Player] Track end: clockEnd={clockEnd} eofDrained={eofDrained} " +
+                    $"clock={GetMasterClock():F1}s dur={_duration:F1}s trackEof={_trackEof} " +
+                    $"clockStarted={_clockStarted} audioQueue={_audioQueue.Count} " +
+                    $"trackAge={trackAge} sinceReopen={sinceReopen}");
                 _trackEnded = true;
                 if (Playlist != null && Playlist.Count > 0)
                 {
