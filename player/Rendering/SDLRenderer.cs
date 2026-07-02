@@ -76,6 +76,9 @@ public sealed partial class SDLRenderer : IDisposable
     private SDL.SDL_Rect _btnAdd;
     private SDL.SDL_Rect _btnAddFolder;
     private SDL.SDL_Rect _btnAddUrl;
+    private SDL.SDL_Rect _btnServer;
+    private SDL.SDL_Rect _btnDisconnect;
+    private SDL.SDL_Rect _btnFilter;
     private SDL.SDL_Rect _btnClear;
 
     // Progress bar bottom buttons
@@ -167,7 +170,11 @@ public sealed partial class SDLRenderer : IDisposable
         DrawContextMenu();
         if (ControlsVisible) DrawVolumeHud();
         if (AboutVisible) DrawAbout();
+        if (LoginVisible) DrawLogin();
+        if (SeriesInfoVisible) DrawSeriesInfo();
+        if (EpisodeInfoVisible) DrawEpisodeInfo();
         DrawError();
+        DrawStatus();
         SDL.SDL_RenderPresent(_renderer);
     }
 
@@ -220,7 +227,14 @@ public sealed partial class SDLRenderer : IDisposable
             DrawVolumeHud();
         if (AboutVisible)
             DrawAbout();
+        if (LoginVisible)
+            DrawLogin();
+        if (SeriesInfoVisible)
+            DrawSeriesInfo();
+        if (EpisodeInfoVisible)
+            DrawEpisodeInfo();
         DrawError();
+        DrawStatus();
         UpdateFps();
         DrawFps();
         DrawSubtitle();

@@ -8,7 +8,7 @@ namespace CSharpFFmpeg;
 
 public sealed partial class Player : IDisposable
 {
-    private readonly FFmpegDecoder _decoder = new();
+    private FFmpegDecoder _decoder = new();
     private SDLRenderer _renderer = new();
     private Thread? _decodeThread;
 
@@ -68,6 +68,8 @@ public sealed partial class Player : IDisposable
     private volatile bool _asyncOpenPending;
     private volatile bool _asyncOpenComplete;
     private volatile bool _asyncOpenSuccess;
+    private volatile bool _cancelOpen;
+    private volatile bool _asyncOpenRunning;
     private volatile Exception? _asyncOpenError;
     private volatile string? _asyncOpenFilePath;
     private volatile PlaylistEntry? _asyncOpenEntry;
@@ -88,6 +90,9 @@ public sealed partial class Player : IDisposable
     public int TargetFps { set => _targetFps = value; }
     public string? SubtitlePath { get; set; }
     public Playlist? Playlist { get; set; }
+    public MediaServerClient? ServerClient { get; set; }
+    // Server navigation cache: playlist items keyed by playlist ID
+    public Dictionary<int, List<RemoteMedia>> ServerPlaylistCache { get; } = new();
     public double StartPositionSec { get; set; } = 0;
     public float RestoreVolume { get; set; } = 1.0f;
     public bool RestorePlaylistVisible { get; set; } = false;
@@ -109,7 +114,7 @@ public sealed partial class Player : IDisposable
             _renderer.PlaylistPanelVisible, wx, wy, ww, wh);
     }
 
-    public void Play(string filePath, PlaylistEntry? entry = null)
+    public void Play(string? filePath, PlaylistEntry? entry = null)
     {
         _renderer.Volume = RestoreVolume;
         _renderer.PlaylistPanelVisible = RestorePlaylistVisible;

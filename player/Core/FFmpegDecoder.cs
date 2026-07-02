@@ -29,7 +29,7 @@ public sealed unsafe class FFmpegDecoder : IDisposable
     private long _interruptDeadline;
     private GCHandle _interruptGcHandle;
 
-    private const int OpenTimeoutMs = 15000;
+    private const int OpenTimeoutMs = 30000;
 
     private static int InterruptCallback(void* opaque)
     {
@@ -79,8 +79,8 @@ public sealed unsafe class FFmpegDecoder : IDisposable
             ffmpeg.av_dict_set(&opts, "reconnect_delay_max", "5", 0);
             ffmpeg.av_dict_set(&opts, "analyzeduration", "10000000", 0);
             ffmpeg.av_dict_set(&opts, "probesize", "10000000", 0);
-            ffmpeg.av_dict_set(&opts, "rw_timeout", "15000000", 0);
-            ffmpeg.av_dict_set(&opts, "timeout", "15000000", 0);
+            ffmpeg.av_dict_set(&opts, "rw_timeout", "30000000", 0);
+            ffmpeg.av_dict_set(&opts, "timeout", "30000000", 0);
             ffmpeg.av_dict_set(&opts, "buffer_size", "1048576", 0);
             // VLC-like: fresh connection per segment, no persistent HTTP/TLS
             ffmpeg.av_dict_set(&opts, "http_persistent", "0", 0);
@@ -102,6 +102,7 @@ public sealed unsafe class FFmpegDecoder : IDisposable
             if (opts != null) ffmpeg.av_dict_free(&opts);
             if (ret < 0)
             {
+                // avformat_open_input already cleaned up on failure, just free our handle
                 _fmtCtx = null;
                 if (_interruptGcHandle.IsAllocated) _interruptGcHandle.Free();
                 throw new InvalidOperationException($"avformat_open_input failed: {ret} ({ErrorString(ret)})");
@@ -110,7 +111,11 @@ public sealed unsafe class FFmpegDecoder : IDisposable
         ret = ffmpeg.avformat_find_stream_info(_fmtCtx, null);
         if (ret < 0)
         {
-            Dispose();
+            // Don't call Dispose() here — caller handles disposal to avoid double-dispose.
+            // Just clean up the format context so resources aren't leaked.
+            fixed (AVFormatContext** pFmt = &_fmtCtx)
+                ffmpeg.avformat_close_input(pFmt);
+            if (_interruptGcHandle.IsAllocated) _interruptGcHandle.Free();
             throw new InvalidOperationException($"avformat_find_stream_info failed: {ret} ({ErrorString(ret)})");
         }
 
@@ -223,7 +228,11 @@ public sealed unsafe class FFmpegDecoder : IDisposable
     {
         for (int attempt = 0; attempt < 5; attempt++)
         {
+            // Set timeout for this read — prevents indefinite blocking on HLS segments
+            _interruptDeadline = Environment.TickCount64 + 15000; // 15s timeout per read
             int ret = ffmpeg.av_read_frame(_fmtCtx, _packet);
+            // Reset deadline after read
+            _interruptDeadline = long.MaxValue;
             if (ret >= 0)
             {
                 streamIndex = _packet->stream_index;

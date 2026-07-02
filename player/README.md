@@ -14,11 +14,16 @@ A lightweight, GPU-accelerated video and audio player for Linux, built in C# / .
 - **Wide format support** — MP4, MKV, AVI, MOV, WebM, FLV, WMV, MPG, MPEG, TS, M2TS, VOB, OGV, 3GP, RM, ASF, plus audio: MP3, AAC, FLAC, WAV, OGG, Opus, M4A, WMA, AC3, DTS, AIFF, ALAC
 - **HLS streaming** — `.m3u8` / `.m3u` playlist support (native FFmpeg HLS demuxing)
 - **Playlist management** — drag-and-drop reordering, repeat modes (Once / All / One / Shuffle), add files or folders
+- **Server integration** — connect to CSharpFFmpeg Media Server, browse remote playlists, play server-hosted media via HLS proxy
+- **Search in playlist** — filter playlist items by name with `/` key or search button
+- **URL hiding** — all server stream URLs are hidden from the UI; status and error messages sanitize URLs to `[URL]`
+- **Episode info panel** — hover over episodes in server playlists to see description, screenshot, and source info
+- **Series info panel** — view series details (genres, poster, season breakdown) when browsing server content
 - **Thumbnail preview** — hover over the progress bar to see a frame preview at that timestamp
 - **Subtitle support** — `.srt`, `.sub`, `.txt` with custom font rendering
 - **Session restore** — remembers last position, volume, playlist, and window geometry
 - **Graceful error handling** — corrupted files show an error overlay and auto-advance instead of crashing
-- **Custom UI** — progress bar with seek, volume control, playlist panel, About dialog, context menu — all rendered with SDL2
+- **Custom UI** — progress bar with seek, volume control, playlist panel with search, server browser, About dialog, context menu — all rendered with SDL2
 
 ---
 
@@ -153,6 +158,9 @@ dotnet run -c Release -- video.mp4 /usr/lib/x86_64-linux-gnu -gpu
 
 # No arguments — restores last session or opens file dialog
 dotnet run -c Release
+
+# Connect to media server
+dotnet run -c Release -- --server http://localhost:8800 --api-key YOUR_API_KEY
 ```
 
 ### Command-line options
@@ -163,6 +171,8 @@ dotnet run -c Release
 | `--fps N`, `-fps N` | Target render frame rate (e.g. 30, 60, 120, 144) |
 | `--subtitle PATH`, `-sub PATH` | Load subtitle file (.srt, .sub, .txt) |
 | `--playlist PATH`, `-pl PATH` | Load playlist file (.m3u, .m3u8, .txt — one file per line) |
+| `--server URL` | Connect to CSharpFFmpeg Media Server (e.g. http://localhost:8800) |
+| `--api-key KEY` | API key for server authentication |
 | `--help`, `-h` | Show help message |
 | `<file...>` | One or more media files to play sequentially |
 | `<lib-path>` | Path to directory containing FFmpeg/SDL2 .so files (auto-detected if omitted) |
@@ -180,13 +190,15 @@ dotnet run -c Release
 | **N** | Next track in playlist |
 | **P** | Previous track in playlist |
 | **F** | Toggle fullscreen |
-| **ESC** | Exit fullscreen (or close About overlay) |
+| **ESC** | Exit fullscreen / close overlay / cancel search |
 | **T** | Toggle always on top |
 | **Q** | Save session and quit |
 | **TAB** | Toggle playlist panel |
+| **/** | Activate search in playlist panel |
 | **Up / Down** | Select previous / next playlist item (when panel visible) |
 | **Del** | Remove selected item from playlist |
-| **Enter** | Play selected playlist item |
+| **Backspace** | Delete last char in search (when search active) / go back in server browser |
+| **Enter** | Play selected playlist item / confirm search selection |
 
 ### Mouse
 
@@ -242,7 +254,22 @@ A 340px wide panel on the left side of the window, visible when toggled. Contain
 | **Repeat mode** | `[Once]` / `[All]` / `[One]` / `[Shuf]` | Cycles repeat modes |
 | **Add file** | `ADD` | Opens file dialog to add individual media files |
 | **Add folder** | `DIR` | Opens folder dialog to add all media files from a directory (recursively) |
+| **Search** | `🔍` | Toggles search mode (or press `/` key) |
 | **Clear playlist** | `CLR` | Removes all items from the playlist and stops playback |
+| **Browse server** | `SRV` | Connect to CSharpFFmpeg Media Server and browse remote playlists |
+| **Disconnect** | `DC` | Disconnect from media server and return to local playlist |
+
+#### Search mode
+
+When search is active (toggled by `🔍` button or `/` key):
+
+- A search input bar appears in the panel header with a blinking cursor
+- Playlist items are filtered in real-time by display name (case-insensitive)
+- Result count is shown (e.g. `3 / 12`)
+- Up/Down arrows navigate filtered results
+- Enter plays the selected filtered item and exits search
+- ESC cancels search and restores full playlist
+- Backspace deletes the last character from the search query
 
 #### Item list
 
@@ -317,6 +344,18 @@ The player automatically saves the current state to a session file on exit:
 
 On next launch (without CLI arguments), the session is restored and playback resumes from the saved position.
 
+### Server integration
+
+When launched with `--server URL --api-key KEY`, the player connects to CSharpFFmpeg Media Server:
+
+- **Browse server playlists** — click `SRV` button in playlist panel to fetch and display remote playlists
+- **Play server media** — click a server playlist to load its episodes, then click an episode to play it via HLS proxy
+- **Episode info** — hovering over an episode shows description, screenshot, and source info in a side panel
+- **Series info** — hovering over a series name shows genres, poster, and season breakdown
+- **Back navigation** — press `Backspace` to go back from episode list to playlist list
+- **Disconnect** — click `DC` button to disconnect from server and return to local playlist
+- **URL hiding** — all server stream URLs are hidden from the UI; the player only sees `server://media/{id}` entries
+
 ---
 
 ## Architecture
@@ -326,12 +365,23 @@ On next launch (without CLI arguments), the session is restored and playback res
 ```text
 CSharpFFmpeg/
 ├── Program.cs              # Entry point, CLI argument parsing, native lib resolution
-├── FFmpegDecoder.cs        # FFmpeg decoding: av_read_frame, avcodec_send/receive, sws_scale, swr_convert, seek, thumbnail
-├── Player.cs               # Main event loop, A/V sync, decode thread, input handling, playlist logic
-├── SDLRenderer.cs          # SDL2 window, YUV texture rendering, audio output, UI drawing (progress bar, playlist, overlays)
-├── SDLTtf.cs               # SDL2_ttf P/Invoke wrappers for text rendering
-├── Playlist.cs             # Playlist model: add, remove, move, advance, shuffle, repeat modes, HLS folder detection
-├── SessionManager.cs       # Session save/restore (position, volume, playlist, window geometry)
+├── Core/
+│   ├── FFmpegDecoder.cs    # FFmpeg decoding: av_read_frame, avcodec_send/receive, sws_scale, swr_convert, seek, thumbnail
+│   ├── MediaServerClient.cs # HTTP client for CSharpFFmpeg Media Server API
+│   ├── PlaylistEntry.cs    # Playlist item model with server media support
+│   └── RemoteMedia.cs      # Remote media models (playlists, series, episodes)
+├── Player/
+│   ├── Player.cs           # Main player class, A/V sync, decode thread
+│   ├── Player.EventLoop.cs # SDL event loop, keyboard/mouse input handling, search, server navigation
+│   ├── Player.Playlist.cs  # Playlist logic, server browsing, drag-and-drop, repeat modes
+│   └── Player.Session.cs   # Session save/restore (position, volume, playlist, window geometry)
+├── Rendering/
+│   ├── SDLRenderer.cs      # SDL2 window, YUV texture rendering, audio output, UI constants
+│   ├── SDLRenderer.Playlist.cs # Playlist panel rendering, search bar, hit testing, scrolling
+│   ├── SDLRenderer.ProgressBar.cs # Progress bar, seek, thumbnail preview
+│   ├── SDLRenderer.Status.cs # Status messages with URL sanitization
+│   ├── SDLRenderer.Error.cs  # Error overlays with URL sanitization
+│   └── SDLTtf.cs           # SDL2_ttf P/Invoke wrappers for text rendering
 ├── subtitles/              # Subtitle parsing and rendering subsystem
 │   ├── Subtitle.cs
 │   ├── SubtitleManager.cs
@@ -339,6 +389,11 @@ CSharpFFmpeg/
 │   ├── SubtitleExtensions.cs
 │   ├── SubtitleLoadException.cs
 │   └── SubtitleParseException.cs
+├── plugins/
+│   └── FilmanPlugin/       # Plugin for extracting HLS streams from filman.cc
+│       ├── FilmanPlugin.cs # C# plugin: calls extract.py, parses JSON
+│       ├── extract.py      # Python extractor: 10+ hosting sites (voe.sx, streamtape, doodstream, etc.)
+│       └── README.md       # Plugin documentation
 ├── lib/                    # Bundled native .so libraries (FFmpeg + SDL2)
 └── CSharpFFmpeg.csproj     # Project file (.NET 8, NuGet references)
 ```

@@ -24,4 +24,12 @@
     <None Include="lib\**\*" CopyToOutputDirectory="PreserveNewest" Link="lib\%(RecursiveDir)%(FileName)%(Extension)" />
   </ItemGroup>
 
+  <Target Name="CopyPlugins" AfterTargets="Build">
+    <ItemGroup>
+      <PluginFiles Include="$(MSBuildThisFileDirectory)plugins\FilmanPlugin\bin\Debug\net8.0\FilmanPlugin.dll" />
+      <PluginFiles Include="$(MSBuildThisFileDirectory)plugins\FilmanPlugin\extract.py" />
+    </ItemGroup>
+    <Copy SourceFiles="@(PluginFiles)" DestinationFolder="$(OutDir)plugins" SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

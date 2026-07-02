@@ -7,7 +7,10 @@ public sealed partial class Player
 {
     private void DecodeLoop()
     {
-        while (_decodeRunning)
+        var dec = _decoder;  // Capture current decoder
+        int packetCount = 0;
+        long startTicks = Environment.TickCount64;
+        while (_decodeRunning && ReferenceEquals(_decoder, dec))
         {
             if (_paused) { Thread.Sleep(20); continue; }
 
@@ -15,7 +18,7 @@ public sealed partial class Player
             {
                 _seekRequested = false;
                 ClearQueues();
-                bool seekOk = _decoder.Seek(_seekTarget);
+                bool seekOk = dec.Seek(_seekTarget);
                 Console.Error.WriteLine($"[Decoder] Seek to {_seekTarget:F1}s: ok={seekOk}");
                 _clockStarted = false;
                 continue;
@@ -30,50 +33,59 @@ public sealed partial class Player
                 }
             }
 
-            if (!_decoder.ReadPacket(out int streamIdx))
+            if (!dec.ReadPacket(out int streamIdx))
             {
                 Console.Error.WriteLine($"[Decoder] ReadPacket returned false (EOF/error), trackEof set. clockStarted={_clockStarted}");
-                _trackEof = true;
-                _decodeRunning = false;
+                if (ReferenceEquals(_decoder, dec))
+                {
+                    _trackEof = true;
+                    _decodeRunning = false;
+                }
                 break;
             }
 
-            int sendRet = _decoder.SendPacket();
+            int sendRet = dec.SendPacket();
             if (sendRet < 0)
             {
                 Console.Error.WriteLine($"[Decoder] SendPacket error: {sendRet} ({FFmpegDecoder.ErrorString(sendRet)})");
-                _decoder.UnrefPacket();
+                dec.UnrefPacket();
                 continue;
             }
-            _decoder.UnrefPacket();
-
-            if (streamIdx == _decoder.VideoStreamIndex)
+            dec.UnrefPacket();
+            packetCount++;
+            if (packetCount % 100 == 0)
             {
-                while (_decoder.ReceiveVideoFrame())
+                long elapsed = Environment.TickCount64 - startTicks;
+                Console.Error.WriteLine($"[Decoder] {packetCount} packets in {elapsed}ms (vq={_videoQueue.Count} aq={_audioQueue.Count})");
+            }
+
+            if (streamIdx == dec.VideoStreamIndex)
+            {
+                while (dec.ReceiveVideoFrame())
                 {
-                    double pts = _decoder.GetVideoFramePts();
+                    double pts = dec.GetVideoFramePts();
                     if (!_clockStarted)
                     {
                         _clockBasePts = pts;
                         _clock.Restart();
                         _clockStarted = true;
                     }
-                    var vf = VideoFrame.FromDecoder(_decoder, _videoWidth, _videoHeight);
+                    var vf = VideoFrame.FromDecoder(dec, _videoWidth, _videoHeight);
                     var vfWithPts = new VideoFrame(pts, vf.YPlane, vf.UPlane, vf.VPlane, vf.YStride, vf.UVStride);
                     lock (_videoLock)
                     {
                         _videoQueue.Enqueue(vfWithPts);
                         Monitor.Pulse(_videoLock);
                     }
-                    _decoder.UnrefFrame();
+                    dec.UnrefFrame();
                 }
             }
-            else if (streamIdx == _decoder.AudioStreamIndex)
+            else if (streamIdx == dec.AudioStreamIndex)
             {
-                while (_decoder.ReceiveAudioFrame())
+                while (dec.ReceiveAudioFrame())
                 {
-                    _audioPts = _decoder.GetAudioFramePts();
-                    var pcm = _decoder.CopyAudioFrame();
+                    _audioPts = dec.GetAudioFramePts();
+                    var pcm = dec.CopyAudioFrame();
                     if (pcm.Length > 0)
                     {
                         lock (_audioLock)
@@ -88,7 +100,7 @@ public sealed partial class Player
                             _audioQueue.Enqueue(pcm);
                         }
                     }
-                    _decoder.UnrefFrame();
+                    dec.UnrefFrame();
                 }
             }
         }

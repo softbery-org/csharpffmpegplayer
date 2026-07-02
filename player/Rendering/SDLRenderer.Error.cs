@@ -10,7 +10,7 @@ public sealed partial class SDLRenderer
 
     public void ShowError(string message)
     {
-        _errorText     = message;
+        _errorText     = SanitizeUrls(message);
         _errorShowTick = Environment.TickCount64;
     }
 

@@ -17,6 +17,9 @@ public sealed class PlaylistEntry
 
     public static string ExtractDisplayName(string url)
     {
+        // Never expose server stream URLs
+        if (url.Contains("/api/media/") && url.Contains("/stream"))
+            return "Media";
         if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ||
             url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
         {

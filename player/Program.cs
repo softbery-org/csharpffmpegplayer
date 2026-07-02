@@ -21,6 +21,8 @@ class Program
         string? subtitlePath = null;
         string? playlistPath = null;
         string? urlListPath = null;
+        string? serverUrl = null;
+        string? serverKey = null;
         var mediaFiles = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -54,8 +56,19 @@ class Program
                 urlListPath = args[i + 1];
                 i++;
             }
+            else if (args[i] == "--server" && i + 1 < args.Length)
+            {
+                serverUrl = args[i + 1];
+                i++;
+            }
+            else if (args[i] == "--server-key" && i + 1 < args.Length)
+            {
+                serverKey = args[i + 1];
+                i++;
+            }
             else if (args[i] == "-gpu" || args[i] == "--gpu" || args[i] == "--help" || args[i] == "-h" ||
-                     args[i] == "--url-list" || args[i] == "-ul" || args[i] == "--api-port" || args[i] == "--api-public")
+                     args[i] == "--url-list" || args[i] == "-ul" || args[i] == "--api-port" || args[i] == "--api-public" ||
+                     args[i] == "--server" || args[i] == "--server-key")
             {
                 continue;
             }
@@ -81,7 +94,7 @@ class Program
         // Detect lib path: a path that exists as directory and contains FFmpeg libs
         foreach (var arg in args)
         {
-            if (arg == "-gpu" || arg == "--gpu" || arg == "--fps" || arg == "-fps" || arg == "--subtitle" || arg == "-sub" || arg == "--playlist" || arg == "-pl" || arg == "--help" || arg == "-h" || arg == "--api-port" || arg == "--api-public")
+            if (arg == "-gpu" || arg == "--gpu" || arg == "--fps" || arg == "-fps" || arg == "--subtitle" || arg == "-sub" || arg == "--playlist" || arg == "-pl" || arg == "--help" || arg == "-h" || arg == "--api-port" || arg == "--api-public" || arg == "--server" || arg == "--server-key" || arg == "--url-list" || arg == "-ul")
                 continue;
             if (int.TryParse(arg, out _))
                 continue;
@@ -125,6 +138,35 @@ class Program
             var playlist = new Playlist();
             double restorePositionSec = 0;
             SessionData? restoredSession = null;
+            MediaServerClient? serverClient = null;
+
+            // Connect to media server if --server is specified
+            if (!string.IsNullOrWhiteSpace(serverUrl))
+            {
+                serverClient = new MediaServerClient();
+                serverClient.Configure(serverUrl);
+                if (!string.IsNullOrWhiteSpace(serverKey))
+                {
+                    serverClient.SetApiKey(serverKey);
+                    Console.Error.WriteLine($"[Server] Connected to {serverUrl} with API key");
+                }
+                else
+                {
+                    Console.Error.WriteLine($"[Server] Configured {serverUrl} — use UI to login");
+                }
+            }
+            else
+            {
+                // Try auto-login from saved credentials
+                var savedCreds = ServerCredentialsManager.Load();
+                if (savedCreds != null && !string.IsNullOrEmpty(savedCreds.ApiKey))
+                {
+                    serverClient = new MediaServerClient();
+                    serverClient.Configure(savedCreds.ServerUrl);
+                    serverClient.SetApiKey(savedCreds.ApiKey!);
+                    Console.Error.WriteLine($"[Server] Auto-connected to {savedCreds.ServerUrl} as {savedCreds.Username}");
+                }
+            }
 
             bool hasCLIMedia = mediaFiles.Count > 0 || playlistPath != null || urlListPath != null;
 
@@ -150,11 +192,9 @@ class Program
                         playlist.AddRange(picked);
 
                     if (playlist.Count == 0)
-                    {
-                        Console.Error.WriteLine("No media files selected.");
-                        return 1;
-                    }
-                    playlist.Reset();
+                        Console.Error.WriteLine("[Playlist] Empty — use SRV button or ADD to add media.");
+                    else
+                        playlist.Reset();
                 }
             }
             else
@@ -178,26 +218,7 @@ class Program
 
                     foreach (var url in urls)
                     {
-                        var plugin = PluginLoader.FindPluginForUrl(url);
-                        if (plugin != null)
-                        {
-                            Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {url}");
-                            var entries = plugin.Resolve(url);
-                            if (entries.Count > 0)
-                            {
-                                foreach (var e in entries)
-                                    playlist.Add(e);
-                                Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS do playlisty");
-                            }
-                            else
-                            {
-                                Console.Error.WriteLine($"[{plugin.Name}] Nie znaleziono linków HLS dla: {url}");
-                            }
-                        }
-                        else
-                        {
-                            playlist.Add(url);
-                        }
+                        AddUrlToPlaylist(playlist, url);
                     }
                 }
 
@@ -205,37 +226,13 @@ class Program
                 foreach (var f in mediaFiles)
                 {
                     if (f == playlistPath) continue;
-
-                    var plugin = PluginLoader.FindPluginForUrl(f);
-                    if (plugin != null)
-                    {
-                        Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {f}");
-                        var entries = plugin.Resolve(f);
-                        if (entries.Count > 0)
-                        {
-                            foreach (var e in entries)
-                                playlist.Add(e);
-                            Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS do playlisty");
-                        }
-                        else
-                        {
-                            Console.Error.WriteLine($"[{plugin.Name}] Nie znaleziono linków HLS dla: {f}");
-                        }
-                    }
-                    else
-                    {
-                        playlist.Add(f);
-                    }
+                    AddUrlToPlaylist(playlist, f);
                 }
 
                 if (playlist.Count == 0)
-                {
-                    Console.Error.WriteLine("No media files found.");
-                    PrintHelp();
-                    return 1;
-                }
-
-                playlist.Reset();
+                    Console.Error.WriteLine("[Playlist] Empty — use SRV button or ADD to add media.");
+                else
+                    playlist.Reset();
             }
 
             using var player = new Player();
@@ -243,6 +240,8 @@ class Program
             if (targetFps > 0) player.TargetFps = targetFps;
             if (subtitlePath != null) player.SubtitlePath = subtitlePath;
             player.Playlist = playlist;
+            if (serverClient != null)
+                player.ServerClient = serverClient;
             player.StartPositionSec = restorePositionSec;
             if (restoredSession != null)
             {
@@ -257,13 +256,59 @@ class Program
                 player.StartHttpApi(apiPort, false);
             if (apiPublicPort > 0)
                 player.StartHttpApi(apiPublicPort, true);
-            player.Play(playlist.Current, playlist.CurrentEntry);
+            if (playlist.Count > 0)
+                player.Play(playlist.Current, playlist.CurrentEntry);
+            else
+                player.Play(null, null);
             return 0;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"Error: {ex}");
             return 1;
+        }
+    }
+
+    static void AddUrlToPlaylist(Playlist playlist, string url)
+    {
+        var plugin = PluginLoader.FindPluginForUrl(url);
+        if (plugin is ISeriesPlugin seriesPlugin)
+        {
+            var episodes = seriesPlugin.GetEpisodes(url);
+            if (episodes.Count > 0)
+            {
+                Console.Error.WriteLine($"[{plugin.Name}] Znaleziono {episodes.Count} odcinków dla: {url}");
+                int epIdx = 0;
+                foreach (var ep in episodes)
+                {
+                    epIdx++;
+                    Console.Error.WriteLine($"[{plugin.Name}] Odcinek {epIdx}/{episodes.Count}: {ep.Title}");
+                    var epEntries = seriesPlugin.ResolveEpisode(ep.Url, ep.Title);
+                    foreach (var e in epEntries)
+                        playlist.Add(e);
+                }
+                Console.Error.WriteLine($"[{plugin.Name}] Dodano {episodes.Count} odcink(ów) do playlisty");
+                return;
+            }
+        }
+        if (plugin != null)
+        {
+            Console.Error.WriteLine($"[{plugin.Name}] Ekstrakcja linków z: {url}");
+            var entries = plugin.Resolve(url);
+            if (entries.Count > 0)
+            {
+                foreach (var e in entries)
+                    playlist.Add(e);
+                Console.Error.WriteLine($"[{plugin.Name}] Dodano {entries.Count} link(ów) HLS do playlisty");
+            }
+            else
+            {
+                Console.Error.WriteLine($"[{plugin.Name}] Nie znaleziono linków HLS dla: {url}");
+            }
+        }
+        else
+        {
+            playlist.Add(url);
         }
     }
 
@@ -382,6 +427,8 @@ class Program
             -ul PATH            Alias for --url-list
             --api-port PORT     Enable HTTP API on localhost:PORT (local only)
             --api-public PORT   Enable HTTP API on 0.0.0.0:PORT (NAT/remote access)
+            --server URL        Connect to media server (e.g. http://192.168.1.100:8000)
+            --server-key KEY    API key for media server authentication
             --help, -h           Show this help message
 
             <file...>            One or more media files to play sequentially
